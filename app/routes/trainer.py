@@ -3,7 +3,7 @@ Trainer API routes - message quota enforcement and AI chat
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from supabase import Client
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ async def use_trainer_message(
 @router.post("/chat", response_model=TrainerChatResponse)
 async def chat_with_trainer(
     request: TrainerChatRequest,
+    background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
 ):
     """
@@ -140,22 +141,27 @@ async def chat_with_trainer(
                     }
                 )
             raise
+
+        instant_reply = ai_service.get_instant_reply(request.message)
+        if instant_reply:
+            return {
+                "reply": instant_reply,
+                "messages_used": usage["messages_used"],
+                "messages_remaining": usage["messages_remaining"]
+            }
         
-        # Step 2.5: Extract and save profile data if present in message
-        # This runs in parallel with AI response generation (non-blocking)
-        extractor_service = ProfileExtractorService()
-        try:
-            extracted_data = await extractor_service.extract_and_save(
-                user_message=request.message,
-                user_id=user["id"],
-                client=client
-            )
-            if extracted_data:
-                # Profile was updated - AI will use new data in response
-                pass
-        except Exception as e:
-            # If extraction fails, continue with AI response (graceful degradation)
-            logger.warning(f"Profile extraction failed: {str(e)}")
+        async def extract_profile_later():
+            extractor_service = ProfileExtractorService()
+            try:
+                await extractor_service.extract_and_save(
+                    user_message=request.message,
+                    user_id=user["id"],
+                    client=client
+                )
+            except Exception as e:
+                logger.warning(f"Profile extraction failed: {str(e)}")
+
+        background_tasks.add_task(extract_profile_later)
         
         # Step 3: Get AI response from DeepSeek with profile personalization
         try:

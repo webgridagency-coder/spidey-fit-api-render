@@ -6,6 +6,7 @@ Includes user profile and workout catalog personalization
 
 import httpx
 import logging
+import re
 from typing import Dict, Any, Optional
 from supabase import Client
 
@@ -378,7 +379,28 @@ Speak like a real human coach having a conversation."""
         self.api_key = settings.OPENROUTER_API_KEY
         self.api_url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
         self.model = settings.OPENROUTER_MODEL
-        self.timeout = settings.OPENROUTER_TIMEOUT
+        self.timeout = min(settings.OPENROUTER_TIMEOUT, 12)
+
+    def get_instant_reply(self, user_message: str) -> Optional[str]:
+        """Return instant replies for common low-context trainer prompts."""
+        message = re.sub(r"\s+", " ", user_message.strip().lower())
+
+        if message in {"hi", "hey", "hello", "help"}:
+            return "What do you need right now?\n\n- Today's workout\n- Meal plan\n- Fat loss help\n- Protein target"
+
+        if message in {"today's workout", "todays workout", "today workout", "workout"}:
+            return "🏋️ Today's workout:\n\nPick one muscle group and start the plan.\n\n- Keep rests short\n- Finish every set with control\n- Log it when done\n\n✅ Next step: open Workout and start."
+
+        if message in {"low energy", "tired", "no energy"}:
+            return "Low energy plan:\n\n- Drink water first\n- Eat protein plus carbs\n- Do 20 minutes easy training\n- Sleep earlier tonight\n\n✅ Keep it light, but do not skip."
+
+        if message in {"protein help", "protein"}:
+            return "Protein target:\n\n- Aim for protein in every meal\n- Use eggs, chicken, paneer, curd, dal\n- Keep one high-protein snack ready\n\n✅ Next meal: add one protein source."
+
+        if message in {"fat loss", "weight loss"}:
+            return "Fat loss focus:\n\n- Keep calories controlled\n- Hit protein first\n- Walk after meals\n- Train 3-5 days weekly\n\n✅ Today: log food before dinner."
+
+        return None
     
     def _format_response_with_line_breaks(self, response: str) -> str:
         """Post-process AI response to force proper line breaks between emoji sections."""
@@ -668,7 +690,7 @@ Speak like a real human coach having a conversation."""
                 }
             ],
             "temperature": 0.4,  # Lower temp for better instruction following (formatting)
-            "max_tokens": 250,  # Reduced further to enforce concise responses
+            "max_tokens": 170,
             "stream": False
         }
         
@@ -717,4 +739,3 @@ Speak like a real human coach having a conversation."""
             # Otherwise, log and return generic message
             logger.error(f"OpenRouter unexpected error: {type(e).__name__}: {str(e)}")
             raise Exception("AI service is temporarily unavailable. Please try again later.")
-
