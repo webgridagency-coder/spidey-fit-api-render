@@ -98,7 +98,13 @@ async def shutdown_event():
 
 
 # Include API routers
-from app.routes import workouts, trainer, profile, food
+from app.routes import workouts, trainer, profile, food, auth
+
+app.include_router(
+    auth.router,
+    prefix=f"{settings.API_V1_PREFIX}/auth",
+    tags=["Auth"]
+)
 
 app.include_router(
     workouts.router, 
