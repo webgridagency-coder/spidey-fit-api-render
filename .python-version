@@ -1,0 +1,19 @@
+3.12
+*** Add File: /private/tmp/spidey-fit-api-render-1780989179/README.md
+# Spidy Fit API
+
+FastAPI backend for Spidy Fit.
+
+## Render
+
+Build command:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
