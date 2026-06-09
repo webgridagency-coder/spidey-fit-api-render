@@ -636,7 +636,8 @@ Speak like a real human coach having a conversation."""
         self, 
         user_message: str, 
         user_id: Optional[str] = None,
-        client: Optional[Client] = None
+        client: Optional[Client] = None,
+        fresh_profile_data: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Get AI response from DeepSeek API with profile and workout personalization.
@@ -660,6 +661,10 @@ Speak like a real human coach having a conversation."""
         """
         # Build system prompt with optional contexts
         system_prompt = self.BASE_SYSTEM_PROMPT
+
+        if fresh_profile_data:
+            fresh_context = "\n".join([f"{key}: {value}" for key, value in fresh_profile_data.items()])
+            system_prompt += f"\n\nNEW USER DATA FROM THIS MESSAGE:\n{fresh_context}"
         
         if user_id and client:
             # Add profile context (age, goal, injuries, etc.)

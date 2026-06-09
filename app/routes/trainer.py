@@ -142,6 +142,15 @@ async def chat_with_trainer(
                 )
             raise
 
+        extractor_service = ProfileExtractorService()
+        fast_profile_data = extractor_service.extract_profile_data_fast(request.message)
+        if fast_profile_data:
+            await extractor_service.save_profile_data(
+                user_id=user["id"],
+                profile_data=fast_profile_data,
+                client=client
+            )
+
         instant_reply = ai_service.get_instant_reply(request.message)
         if instant_reply:
             return {
@@ -151,7 +160,6 @@ async def chat_with_trainer(
             }
         
         async def extract_profile_later():
-            extractor_service = ProfileExtractorService()
             try:
                 await extractor_service.extract_and_save(
                     user_message=request.message,
@@ -161,14 +169,16 @@ async def chat_with_trainer(
             except Exception as e:
                 logger.warning(f"Profile extraction failed: {str(e)}")
 
-        background_tasks.add_task(extract_profile_later)
+        if not fast_profile_data:
+            background_tasks.add_task(extract_profile_later)
         
         # Step 3: Get AI response from DeepSeek with profile personalization
         try:
             ai_reply = await ai_service.get_ai_response(
                 user_message=request.message,
                 user_id=user["id"],
-                client=client
+                client=client,
+                fresh_profile_data=fast_profile_data or None
             )
         except Exception as e:
             # If AI fails, we still consumed a message

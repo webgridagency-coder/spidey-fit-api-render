@@ -6,6 +6,7 @@ Uses OpenRouter AI to parse natural language and save to user_profile table
 import json
 import httpx
 import logging
+import re
 from typing import Dict, Any
 from supabase import Client
 
@@ -62,6 +63,120 @@ Return JSON:"""
         self.api_key = settings.OPENROUTER_API_KEY
         self.api_url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
         self.model = settings.OPENROUTER_MODEL
+
+    def extract_profile_data_fast(self, user_message: str) -> Dict[str, Any]:
+        """
+        Extract obvious profile fields without an AI call.
+
+        This keeps the chat fast while still letting the current reply use fresh
+        stats when the user writes things like "I am 89kg, 178cm, recomp".
+        """
+        text = user_message.strip().lower()
+        profile_data: Dict[str, Any] = {}
+
+        weight_match = re.search(r"\b(?:i\s*(?:am|'m)\s*)?([4-9]\d|1\d{2}|200)\s*(?:kg|kgs|kilograms)\b", text)
+        if weight_match:
+            profile_data["weight_kg"] = int(weight_match.group(1))
+
+        height_cm_match = re.search(r"\b(1[0-9]{2}|2[0-4]\d|250)\s*(?:cm|cms|centimeters)\b", text)
+        if height_cm_match:
+            profile_data["height_cm"] = int(height_cm_match.group(1))
+
+        body_fat_match = re.search(r"\b(?:body\s*fat|bf)\s*(?:is|:)?\s*([5-9]|[1-4]\d|50)\s*%?\b", text)
+        if body_fat_match:
+            profile_data["body_fat_percentage"] = float(body_fat_match.group(1))
+
+        age_match = re.search(r"\b(?:age|i\s*(?:am|'m))\s*(?:is|:)?\s*(1[3-9]|[2-9]\d|100)\s*(?:years?|yrs?|yo)?\b", text)
+        if age_match and "kg" not in age_match.group(0):
+            profile_data["age"] = int(age_match.group(1))
+
+        if re.search(r"\b(fat\s*loss|lose\s*fat|weight\s*loss|cutting|cut)\b", text):
+            profile_data["goal"] = "fat_loss"
+        elif re.search(r"\b(muscle\s*gain|gain\s*muscle|bulk|bulking)\b", text):
+            profile_data["goal"] = "muscle_gain"
+        elif re.search(r"\b(recomp|recomposition|body\s*recomp)\b", text):
+            profile_data["goal"] = "recomposition"
+
+        if re.search(r"\b(beginner|newbie|new\s*to\s*(?:gym|training))\b", text):
+            profile_data["experience_level"] = "beginner"
+        elif re.search(r"\b(intermediate|experienced)\b", text):
+            profile_data["experience_level"] = "intermediate"
+        elif re.search(r"\b(advanced|expert|pro)\b", text):
+            profile_data["experience_level"] = "advanced"
+
+        if re.search(r"\b(sedentary|desk\s*job)\b", text):
+            profile_data["activity_level"] = "sedentary"
+        elif re.search(r"\b(light(?:ly)?\s*active|light)\b", text):
+            profile_data["activity_level"] = "light"
+        elif re.search(r"\b(moderate(?:ly)?\s*active|moderate)\b", text):
+            profile_data["activity_level"] = "moderate"
+        elif re.search(r"\b(very\s*active|heavy|highly\s*active)\b", text):
+            profile_data["activity_level"] = "heavy"
+
+        if re.search(r"\b(non\s*veg|non-veg|chicken|fish|egg)\b", text):
+            profile_data["diet_preference"] = "non_veg"
+        elif re.search(r"\b(veg|vegetarian)\b", text):
+            profile_data["diet_preference"] = "veg"
+        elif re.search(r"\b(indian)\b", text):
+            profile_data["diet_preference"] = "indian"
+        elif re.search(r"\b(any\s*(?:food|cuisine|diet)|mixed)\b", text):
+            profile_data["diet_preference"] = "any" if "any" in text else "mixed"
+
+        challenge_match = re.search(r"\b(30|45|60|75|90)\s*[- ]?day\s*challenge\b", text)
+        if challenge_match:
+            profile_data["challenge_duration_days"] = int(challenge_match.group(1))
+
+        if re.search(r"\b(day\s*1|start(?:ing)?\s*(?:my\s*)?challenge|begin(?:ning)?\s*(?:my\s*)?challenge)\b", text):
+            profile_data["is_challenge_start"] = True
+
+        return profile_data
+
+    def normalize_profile_data(self, profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize AI-extracted labels to app/database enum values."""
+        mappings = {
+            "gender": {
+                "male": "male",
+                "female": "female",
+                "other": "other",
+            },
+            "goal": {
+                "fat loss": "fat_loss",
+                "muscle gain": "muscle_gain",
+                "muscle recomposition": "recomposition",
+                "recomposition": "recomposition",
+                "overall fitness": "recomposition",
+            },
+            "experience_level": {
+                "beginner": "beginner",
+                "intermediate": "intermediate",
+                "advanced": "advanced",
+            },
+            "diet_preference": {
+                "indian": "indian",
+                "any cuisine": "any",
+                "any": "any",
+                "veg": "veg",
+                "vegetarian": "veg",
+                "non veg": "non_veg",
+                "non_veg": "non_veg",
+                "mixed": "mixed",
+            },
+            "activity_level": {
+                "sedentary": "sedentary",
+                "light": "light",
+                "moderate": "moderate",
+                "very active": "heavy",
+                "heavy": "heavy",
+            },
+        }
+
+        normalized: Dict[str, Any] = {}
+        for key, value in profile_data.items():
+            if isinstance(value, str) and key in mappings:
+                normalized[key] = mappings[key].get(value.strip().lower(), value.strip().lower())
+            else:
+                normalized[key] = value
+        return normalized
     
     async def extract_profile_data(self, user_message: str) -> Dict[str, Any]:
         """
@@ -133,6 +248,8 @@ Return JSON:"""
                         
                         profile_data[key] = value
                 
+                profile_data = self.normalize_profile_data(profile_data)
+
                 if profile_data:
                     logger.info(f"✅ Extracted profile data: {list(profile_data.keys())}")
                 else:
