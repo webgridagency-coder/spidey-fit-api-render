@@ -33,6 +33,16 @@ class WorkoutService:
             return response.data[0]
         
         return None
+
+    async def get_recent_workouts(self, user_id: str, limit: int = 7) -> list[Dict[str, Any]]:
+        """
+        Get recent workouts for a user, newest first.
+        """
+        response = self.client.table("workouts").select("*").eq(
+            "user_id", user_id
+        ).order("date", desc=True).limit(limit).execute()
+
+        return response.data or []
     
     async def create_or_update_workout(
         self, 
