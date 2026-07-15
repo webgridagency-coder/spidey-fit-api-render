@@ -1,5 +1,5 @@
 """
-Spider-Fit API - Application Package
+Ojas AI API - Application Package
 """
 
 __version__ = "1.0.0"

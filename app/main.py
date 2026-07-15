@@ -1,5 +1,5 @@
 """
-Spider-Fit API - Main FastAPI Application
+Ojas AI API - Main FastAPI Application
 Production-ready FastAPI backend with Supabase integration.
 """
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Backend API for Spider-Fit fitness tracking application",
+    description="Backend API for Ojas AI fitness tracking application",
     version="1.0.0",
     docs_url=f"{settings.API_V1_PREFIX}/docs",
     redoc_url=f"{settings.API_V1_PREFIX}/redoc",
@@ -68,7 +68,7 @@ async def root():
     Root endpoint with API information.
     """
     return {
-        "message": "Welcome to Spider-Fit API",
+        "message": "Welcome to Ojas AI API",
         "version": "1.0.0",
         "docs": f"{settings.API_V1_PREFIX}/docs",
         "health": "/health"

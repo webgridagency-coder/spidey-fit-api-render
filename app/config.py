@@ -1,5 +1,5 @@
 """
-Configuration management for Spider-Fit API.
+Configuration management for Ojas AI API.
 Loads environment variables and provides application settings.
 """
 
@@ -33,13 +33,14 @@ class Settings(BaseSettings):
     
     # Environment
     ENVIRONMENT: str = "development"
+    ALLOW_DEV_AUTH_BYPASS: bool = False
     
     # CORS Configuration
     CORS_ORIGINS: str = "http://localhost:3000"
     
     # API Configuration
     API_V1_PREFIX: str = "/api/v1"
-    PROJECT_NAME: str = "Spider-Fit API"
+    PROJECT_NAME: str = "Ojas AI API"
     
     @property
     def cors_origins_list(self) -> List[str]:

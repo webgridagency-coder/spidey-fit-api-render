@@ -5,6 +5,7 @@ Authentication API routes.
 from fastapi import APIRouter, Depends, HTTPException, status
 from supabase import Client
 
+from app.config import settings
 from app.database import get_supabase_service
 from app.schemas.auth import SignupRequest, SignupResponse
 
@@ -12,72 +13,65 @@ from app.schemas.auth import SignupRequest, SignupResponse
 router = APIRouter()
 
 
-def _normalize_email(email: str) -> str:
-    return email.strip().lower()
+@router.post("/signup", status_code=status.HTTP_410_GONE)
+async def signup(payload: SignupRequest):
+    """
+    Retired legacy admin-signup endpoint.
+
+    Account creation now uses the standard Supabase browser flow so verification,
+    provider redirects, and abuse controls remain within the authentication system.
+    """
+    del payload
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Use the standard Supabase signup flow.",
+    )
 
 
-def _find_user_by_email(client: Client, email: str):
-    page = 1
-    per_page = 100
-
-    while True:
-        users = client.auth.admin.list_users(page=page, per_page=per_page)
-        match = next((user for user in users if (user.email or "").lower() == email), None)
-        if match:
-            return match
-        if len(users) < per_page:
-            return None
-        page += 1
-
-
-@router.post("/signup", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
-async def signup(
+@router.post(
+    "/dev-signup",
+    response_model=SignupResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def dev_signup(
     payload: SignupRequest,
     client: Client = Depends(get_supabase_service),
 ):
-    """
-    Create a confirmed Supabase email/password user.
+    """Create a brand-new confirmed account for local development only.
 
-    Supabase email delivery can be unavailable on trial/default SMTP settings.
-    This endpoint keeps signup usable by confirming accounts server-side with
-    the service role key, then the frontend signs in using the normal client SDK.
+    This route never looks up, updates, or resets an existing account. It is
+    deliberately unavailable unless both the development environment and the
+    explicit bypass flag are enabled.
     """
-    email = _normalize_email(payload.email)
+    if (
+        settings.ENVIRONMENT.strip().lower() != "development"
+        or not settings.ALLOW_DEV_AUTH_BYPASS
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
+    normalized_email = payload.email.strip().lower()
     try:
         created = client.auth.admin.create_user(
             {
-                "email": email,
+                "email": normalized_email,
                 "password": payload.password,
                 "email_confirm": True,
             }
         )
-        user = created.user
-    except Exception as create_error:
-        existing_user = _find_user_by_email(client, email)
-        if not existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unable to create account. Please try a different email address.",
-            ) from create_error
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Unable to create this local test account. Try a new email address.",
+        ) from exc
 
-        try:
-            updated = client.auth.admin.update_user_by_id(
-                existing_user.id,
-                {
-                    "password": payload.password,
-                    "email_confirm": True,
-                },
-            )
-            user = updated.user
-        except Exception as update_error:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This account could not be prepared for login. Please try again.",
-            ) from update_error
+    if not created.user:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The authentication service did not return a user.",
+        )
 
     return SignupResponse(
-        user_id=user.id,
-        email=user.email or email,
+        user_id=str(created.user.id),
+        email=created.user.email or normalized_email,
         confirmed=True,
     )

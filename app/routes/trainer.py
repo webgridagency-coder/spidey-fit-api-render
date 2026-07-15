@@ -151,14 +151,6 @@ async def chat_with_trainer(
                 client=client
             )
 
-        instant_reply = ai_service.get_instant_reply(request.message)
-        if instant_reply:
-            return {
-                "reply": instant_reply,
-                "messages_used": usage["messages_used"],
-                "messages_remaining": usage["messages_remaining"]
-            }
-        
         async def extract_profile_later():
             try:
                 await extractor_service.extract_and_save(
@@ -178,7 +170,11 @@ async def chat_with_trainer(
                 user_message=request.message,
                 user_id=user["id"],
                 client=client,
-                fresh_profile_data=fast_profile_data or None
+                fresh_profile_data=fast_profile_data or None,
+                conversation_history=[
+                    {"role": item.role, "content": item.content}
+                    for item in request.history
+                ],
             )
         except Exception as e:
             # If AI fails, we still consumed a message

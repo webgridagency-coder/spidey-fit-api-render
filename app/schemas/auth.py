@@ -9,7 +9,7 @@ class SignupRequest(BaseModel):
     """Payload for creating a confirmed email/password account."""
 
     email: str = Field(..., min_length=3, max_length=320)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=8, max_length=128)
 
 
 class SignupResponse(BaseModel):
@@ -17,4 +17,4 @@ class SignupResponse(BaseModel):
 
     user_id: str
     email: str
-    confirmed: bool = True
+    confirmed: bool = False

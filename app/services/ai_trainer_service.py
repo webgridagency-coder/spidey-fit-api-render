@@ -20,7 +20,19 @@ class AITrainerService:
     """Service for AI trainer interactions via OpenRouter (DeepSeek model)"""
     
     # Advanced AI Fitness & Nutrition Coach System Prompt
-    BASE_SYSTEM_PROMPT = """You are a real human fitness coach. Act calm, practical, and human.
+    BASE_SYSTEM_PROMPT = """You are Ojas, the user's transparent personal AI fitness coach. Never claim to be human. Sound calm, practical, warm, and specific.
+
+PERSONALIZATION CONTRACT:
+- Ground every answer in the supplied profile, today's nutrition, saved workout, and recent conversation when relevant.
+- Mention the one or two user signals that actually changed your recommendation.
+- Never claim you analyzed information that is not present in the context.
+- Never ask for a fact already present in the context.
+- Treat new explicit facts in the latest message as current. The app may save these to the user's reviewable profile.
+- Do not infer or store sensitive health facts from vague language.
+- If context is incomplete, say what is missing and ask one useful question.
+- Address the user as an ongoing client, but avoid fake familiarity and generic praise.
+- If there is no AVAILABLE WORKOUTS TODAY block, say no workout is saved and do not invent a session or exercise list. Direct the user to choose a workout first.
+- Examples in this prompt illustrate formatting only. Never copy their numbers or exercises unless the user's live context supports them.
 
 🚨 CRITICAL FORMATTING RULE:
 You MUST separate each section with a BLANK LINE. Never write everything in one paragraph.
@@ -631,19 +643,92 @@ Speak like a real human coach having a conversation."""
             # If workout fetch fails, continue without workout context (graceful degradation)
             logger.warning(f"Failed to fetch workout for user {user_id[:8]}...: {str(e)}")
             return ""
+
+    async def get_nutrition_context(self, user_id: str, client: Client) -> str:
+        """Return today's real nutrition totals and meal count for grounded coaching."""
+        try:
+            from datetime import date
+
+            response = client.table("food_entries").select(
+                "meal_type, calories, protein, carbs, fats, fiber"
+            ).eq("user_id", user_id).eq("date", date.today().isoformat()).execute()
+            entries = response.data or []
+            totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fats": 0.0, "fiber": 0.0}
+            for entry in entries:
+                for key in totals:
+                    totals[key] += float(entry.get(key, 0) or 0)
+
+            return (
+                "\n\nTODAY'S NUTRITION (logged data only):\n"
+                f"Meals logged: {len(entries)}\n"
+                f"Calories: {round(totals['calories'])} kcal\n"
+                f"Protein: {round(totals['protein'])} g\n"
+                f"Carbs: {round(totals['carbs'])} g\n"
+                f"Fats: {round(totals['fats'])} g\n"
+                "If zero meals are logged, do not say the user ate nothing; say no meals are logged."
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch nutrition context for user {user_id[:8]}...: {str(e)}")
+            return ""
+
+    def get_personalized_fallback(
+        self,
+        user_message: str,
+        profile_context: str,
+        workout_context: str,
+        nutrition_context: str,
+    ) -> str:
+        """Useful deterministic coaching when the external model is unavailable."""
+        message = user_message.lower()
+        goal_match = re.search(r"Goal: ([^\n]+)", profile_context)
+        experience_match = re.search(r"Experience: ([^\n]+)", profile_context)
+        diet_match = re.search(r"Diet: ([^\n]+)", profile_context)
+        goal = (goal_match.group(1).replace("_", " ") if goal_match else "your current goal")
+        experience = experience_match.group(1) if experience_match else "your current level"
+        diet = diet_match.group(1).replace("_", "-") if diet_match else "your saved preference"
+
+        if any(term in message for term in ("workout", "train", "exercise", "today")):
+            exercise_lines = [line for line in workout_context.splitlines() if line.startswith("-")][:4]
+            if exercise_lines:
+                return (
+                    f"🏋️ Your next session:\n\nBased on your {goal} goal and {experience} experience, use the workout already saved for today.\n\n"
+                    + "\n".join(exercise_lines)
+                    + "\n\n✅ Next step:\nStart the first exercise and keep one or two reps in reserve."
+                )
+            return (
+                f"🏋️ Your next move:\n\nYour profile is set for {goal} at {experience} level, but no workout is saved today.\n\n"
+                "✅ Next step:\nOpen Workout, choose the time and equipment you have, then ask me to adjust it."
+            )
+
+        if any(term in message for term in ("meal", "food", "protein", "diet", "calorie")):
+            meals_match = re.search(r"Meals logged: (\d+)", nutrition_context)
+            protein_match = re.search(r"Protein: (\d+) g", nutrition_context)
+            meals = meals_match.group(1) if meals_match else "0"
+            protein = protein_match.group(1) if protein_match else "0"
+            return (
+                f"🍽️ Personal nutrition check:\n\nYour goal is {goal} and your food preference is {diet}. Today you have {meals} meals and {protein} g protein logged.\n\n"
+                "✅ Next step:\nLog your next meal as eaten. I will adjust from the real total instead of guessing."
+            )
+
+        return (
+            f"I’m coaching around your {goal} goal and {experience} experience.\n\n"
+            "I can use your saved profile, today’s workout, nutrition log, and this conversation.\n\n"
+            "What should we solve first: movement, food, or recovery?"
+        )
     
     async def get_ai_response(
         self, 
         user_message: str, 
         user_id: Optional[str] = None,
         client: Optional[Client] = None,
-        fresh_profile_data: Optional[Dict[str, Any]] = None
+        fresh_profile_data: Optional[Dict[str, Any]] = None,
+        conversation_history: Optional[list[Dict[str, str]]] = None,
     ) -> str:
         """
         Get AI response from DeepSeek API with profile and workout personalization.
         
         System prompt order:
-        1. Base system rules (Spider-Fit AI Trainer)
+        1. Base system rules (Ojas AI AI Trainer)
         2. User profile context (age, goal, injuries, etc.)
         3. Available workout context (exercise catalog)
         4. User message
@@ -661,6 +746,9 @@ Speak like a real human coach having a conversation."""
         """
         # Build system prompt with optional contexts
         system_prompt = self.BASE_SYSTEM_PROMPT
+        profile_context = ""
+        workout_context = ""
+        nutrition_context = ""
 
         if fresh_profile_data:
             fresh_context = "\n".join([f"{key}: {value}" for key, value in fresh_profile_data.items()])
@@ -676,12 +764,31 @@ Speak like a real human coach having a conversation."""
             workout_context = await self.get_workout_context(user_id, client)
             if workout_context:
                 system_prompt += workout_context
+
+            nutrition_context = await self.get_nutrition_context(user_id, client)
+            if nutrition_context:
+                system_prompt += nutrition_context
+
+        if not self.api_key:
+            return self.get_personalized_fallback(
+                user_message=user_message,
+                profile_context=profile_context,
+                workout_context=workout_context,
+                nutrition_context=nutrition_context,
+            )
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
+        recent_history = []
+        for item in (conversation_history or [])[-8:]:
+            role = item.get("role")
+            content = str(item.get("content", "")).strip()[:1200]
+            if role in {"user", "assistant"} and content:
+                recent_history.append({"role": role, "content": content})
+
         payload = {
             "model": self.model,
             "messages": [
@@ -689,6 +796,7 @@ Speak like a real human coach having a conversation."""
                     "role": "system",
                     "content": system_prompt
                 },
+                *recent_history,
                 {
                     "role": "user",
                     "content": user_message

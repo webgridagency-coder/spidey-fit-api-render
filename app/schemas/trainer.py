@@ -3,6 +3,12 @@ Trainer Pydantic schemas for request/response validation
 """
 
 from pydantic import BaseModel, Field
+from typing import List, Literal
+
+
+class TrainerConversationMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=1200)
 
 
 class TrainerQuotaResponse(BaseModel):
@@ -40,6 +46,7 @@ class TrainerUseResponse(BaseModel):
 class TrainerChatRequest(BaseModel):
     """Schema for trainer chat request"""
     message: str = Field(..., min_length=1, max_length=500, description="User's message to the AI trainer")
+    history: List[TrainerConversationMessage] = Field(default_factory=list, max_length=10)
 
     class Config:
         json_schema_extra = {
