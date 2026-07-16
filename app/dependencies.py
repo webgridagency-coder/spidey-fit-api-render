@@ -10,7 +10,7 @@ from jose import JWTError, jwt
 from supabase import Client
 
 from app.config import settings
-from app.database import get_supabase
+from app.database import get_supabase_service
 
 
 # Security scheme for JWT Bearer tokens
@@ -19,7 +19,7 @@ security = HTTPBearer()
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase_service)
 ) -> dict:
     """
     Validate JWT token and return current user.
@@ -44,7 +44,21 @@ async def get_current_user(
             options={"verify_aud": False},
         )
         if payload.get("iss") == "ojas-ai" and payload.get("sub"):
-            return {"id": payload["sub"], "email": payload.get("email", ""), "provider": "ojas"}
+            account = (
+                supabase.table("ojas_accounts")
+                .select("id,email,is_active")
+                .eq("id", payload["sub"])
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if account.data:
+                return {"id": account.data[0]["id"], "email": account.data[0]["email"], "provider": "ojas"}
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session account no longer exists",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     except JWTError:
         pass
 
@@ -93,7 +107,7 @@ async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(
         HTTPBearer(auto_error=False)
     ),
-    supabase: Client = Depends(get_supabase)
+    supabase: Client = Depends(get_supabase_service)
 ) -> Optional[dict]:
     """
     Get current user if token is provided, otherwise return None.
