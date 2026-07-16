@@ -37,9 +37,20 @@ async def get_current_user(
     token = credentials.credentials
     
     try:
-        # Verify token with Supabase
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_aud": False},
+        )
+        if payload.get("iss") == "ojas-ai" and payload.get("sub"):
+            return {"id": payload["sub"], "email": payload.get("email", ""), "provider": "ojas"}
+    except JWTError:
+        pass
+
+    try:
+        # Google accounts continue to use their existing Supabase OAuth session.
         user = supabase.auth.get_user(token)
-        
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -49,7 +60,7 @@ async def get_current_user(
         
         return user.user.model_dump()
     
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",

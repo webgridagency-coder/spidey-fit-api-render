@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    OJAS_ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080
+    FRONTEND_URL: str = "http://localhost:3000"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
     
     # OpenRouter AI Configuration (DeepSeek via OpenRouter)
     OPENROUTER_API_KEY: str = ""
