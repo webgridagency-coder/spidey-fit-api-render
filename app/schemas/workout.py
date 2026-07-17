@@ -34,6 +34,7 @@ class WorkoutResponse(BaseModel):
     muscle: str
     exercises: List[str]
     created_at: str
+    completed_at: Optional[datetime] = None
 
     class Config:
         json_schema_extra = {

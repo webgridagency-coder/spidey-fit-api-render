@@ -3,12 +3,20 @@ Trainer Pydantic schemas for request/response validation
 """
 
 from pydantic import BaseModel, Field
+from datetime import datetime
 from typing import List, Literal, Optional
 
 
 class TrainerConversationMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(..., min_length=1, max_length=1200)
+
+
+class TrainerHistoryMessage(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
 
 
 class TrainerQuotaResponse(BaseModel):

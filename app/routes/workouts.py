@@ -106,3 +106,16 @@ async def get_recent_workouts(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch workout history"
         )
+
+
+@router.post("/complete-today", response_model=WorkoutResponse)
+async def complete_today_workout(
+    user: dict = Depends(get_current_user),
+    client: Client = Depends(get_supabase_service),
+):
+    """Mark today's saved workout completed using a server timestamp."""
+    service = WorkoutService(client)
+    try:
+        return await service.complete_today_workout(user["id"])
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

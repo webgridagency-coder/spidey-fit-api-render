@@ -25,7 +25,10 @@ class AITrainerService:
     BASE_SYSTEM_PROMPT = """You are Ojas, the user's transparent personal AI fitness coach. Never claim to be human. Sound calm, practical, warm, and specific.
 
 PERSONALIZATION CONTRACT:
-- Ground every answer in the supplied profile, today's nutrition, saved workout, and recent conversation when relevant.
+- Ground every answer in the supplied profile, today's exact food items, recent meal history, saved/completed workouts, form sessions, and coaching conversation when relevant.
+- Ojas is the main intelligence layer. Treat the supplied records as the user's source of truth across the app.
+- Distinguish a planned workout from a completed workout. Never say a workout was completed unless completion evidence is present.
+- When asked what the user ate, name the actual logged foods and meal types. Never answer with totals alone when item details are available.
 - Mention the one or two user signals that actually changed your recommendation.
 - Never claim you analyzed information that is not present in the context.
 - Never ask for a fact already present in the context.
@@ -392,9 +395,58 @@ Speak like a real human coach having a conversation."""
     
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
-        self.api_url = f"{settings.OPENROUTER_BASE_URL}/chat/completions"
+        openrouter_base = settings.OPENROUTER_BASE_URL.rstrip("/")
+        self.api_url = openrouter_base if openrouter_base.endswith("/chat/completions") else f"{openrouter_base}/chat/completions"
         self.model = settings.OPENROUTER_MODEL
         self.timeout = min(settings.OPENROUTER_TIMEOUT, 12)
+        self.gemini_api_key = settings.GEMINI_API_KEY
+        self.gemini_api_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        self.gemini_model = settings.GEMINI_MODEL
+        self.last_provider = "fallback"
+
+    def _provider_configs(self) -> list[Dict[str, str]]:
+        """Gemini is the primary Ojas coach, with OpenRouter as a resilient fallback."""
+        providers = []
+        if self.gemini_api_key and "your-" not in self.gemini_api_key.lower():
+            providers.append({"name": "gemini", "url": self.gemini_api_url, "key": self.gemini_api_key, "model": self.gemini_model})
+        if self.api_key and "your-" not in self.api_key.lower():
+            providers.append({"name": "openrouter", "url": self.api_url, "key": self.api_key, "model": self.model})
+        return providers
+
+    def get_saved_conversation_history(self, user_id: str, client: Client, limit: int = 16) -> list[Dict[str, str]]:
+        """Load recent cross-device Ojas messages in chronological order."""
+        try:
+            rows = client.table("trainer_messages").select("role,content,created_at").eq(
+                "user_id", user_id
+            ).order("created_at", desc=True).limit(limit).execute().data or []
+            return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+        except Exception as exc:
+            logger.warning("Coach history unavailable for %s: %s", user_id[:8], str(exc))
+            return []
+
+    def save_conversation_message(
+        self,
+        user_id: str,
+        role: str,
+        content: str,
+        client: Client,
+        request_id: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Persist one reviewed user/assistant message without blocking coaching if storage fails."""
+        try:
+            client.table("trainer_messages").insert({
+                "user_id": user_id,
+                "role": role,
+                "content": content[:8000],
+                "request_id": request_id,
+                "provider": provider,
+            }).execute()
+        except Exception as exc:
+            logger.warning("Could not persist coach message for %s: %s", user_id[:8], str(exc))
+
+    def clear_conversation_history(self, user_id: str, client: Client) -> None:
+        client.table("trainer_messages").delete().eq("user_id", user_id).execute()
 
     def get_instant_reply(self, user_message: str) -> Optional[str]:
         """Return instant replies for common low-context trainer prompts."""
@@ -598,13 +650,14 @@ Speak like a real human coach having a conversation."""
             # Try to get today's workout first
             today = date.today().isoformat()
             response = client.table("workouts").select(
-                "muscle, exercises"
+                "date, muscle, exercises, completed_at"
             ).eq("user_id", user_id).eq("date", today).execute()
+            is_today = bool(response.data)
             
             # If no workout today, get the most recent workout
             if not response.data or len(response.data) == 0:
                 response = client.table("workouts").select(
-                    "muscle, exercises"
+                    "date, muscle, exercises, completed_at"
                 ).eq("user_id", user_id).order(
                     "date", desc=True
                 ).limit(1).execute()
@@ -615,8 +668,10 @@ Speak like a real human coach having a conversation."""
                 return ""
             
             workout = response.data[0]
+            workout_date = workout.get("date", today)
             muscle_group = workout.get("muscle", "Unknown")
             exercises = workout.get("exercises", [])
+            status_label = "completed" if workout.get("completed_at") else "planned, not marked complete"
             
             # Validate exercises data
             if not exercises or not isinstance(exercises, list):
@@ -637,7 +692,12 @@ Speak like a real human coach having a conversation."""
             logger.debug(f"Workout context loaded for user {user_id[:8]}... ({len(exercise_names)} exercises)")
             
             # Format workout context
-            context = f"\n\nAVAILABLE WORKOUTS TODAY:\nMuscle Group: {muscle_group}\nExercises:\n"
+            context = (
+                "\n\nAVAILABLE WORKOUTS TODAY:\n"
+                f"Record: {'today' if is_today else 'most recent saved workout'} ({workout_date})\n"
+                f"Status: {status_label}\n"
+                f"Muscle Group: {muscle_group}\nExercises:\n"
+            )
             context += "\n".join([f"- {name}" for name in exercise_names])
             
             return context
@@ -653,13 +713,22 @@ Speak like a real human coach having a conversation."""
             from datetime import date
 
             response = client.table("food_entries").select(
-                "meal_type, calories, protein, carbs, fats, fiber"
-            ).eq("user_id", user_id).eq("date", date.today().isoformat()).execute()
+                "meal_type, description, calories, protein, carbs, fats, fiber, source, created_at"
+            ).eq("user_id", user_id).eq("date", date.today().isoformat()).order("created_at").execute()
             entries = response.data or []
             totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fats": 0.0, "fiber": 0.0}
             for entry in entries:
                 for key in totals:
                     totals[key] += float(entry.get(key, 0) or 0)
+
+            meal_lines = []
+            for entry in entries:
+                description = str(entry.get("description") or "Unnamed logged food").strip()[:180]
+                meal_lines.append(
+                    f"- {entry.get('meal_type') or 'meal'}: {description} — "
+                    f"{round(float(entry.get('calories', 0) or 0))} kcal, "
+                    f"{round(float(entry.get('protein', 0) or 0))} g protein"
+                )
 
             return (
                 "\n\nTODAY'S NUTRITION (logged data only):\n"
@@ -668,10 +737,33 @@ Speak like a real human coach having a conversation."""
                 f"Protein: {round(totals['protein'])} g\n"
                 f"Carbs: {round(totals['carbs'])} g\n"
                 f"Fats: {round(totals['fats'])} g\n"
-                "If zero meals are logged, do not say the user ate nothing; say no meals are logged."
+                + ("TODAY'S FOOD ITEMS:\n" + "\n".join(meal_lines) + "\n" if meal_lines else "TODAY'S FOOD ITEMS: none logged.\n")
+                + "If zero meals are logged, do not say the user ate nothing; say no meals are logged."
             )
         except Exception as e:
             logger.warning(f"Failed to fetch nutrition context for user {user_id[:8]}...: {str(e)}")
+            return ""
+
+    def get_meal_history_context(self, user_id: str, client: Client) -> str:
+        """Return recent named foods so Ojas can recognize patterns beyond today's totals."""
+        try:
+            from datetime import date, timedelta
+
+            start = (date.today() - timedelta(days=13)).isoformat()
+            rows = client.table("food_entries").select(
+                "date,meal_type,description,calories,protein"
+            ).eq("user_id", user_id).gte("date", start).order("date", desc=True).limit(30).execute().data or []
+            if not rows:
+                return "\n\nRECENT MEAL HISTORY (14 days): No meals logged in this window."
+            lines = [
+                f"- {row.get('date')} · {row.get('meal_type') or 'meal'}: "
+                f"{str(row.get('description') or 'Unnamed logged food')[:140]} "
+                f"({round(float(row.get('calories', 0) or 0))} kcal, {round(float(row.get('protein', 0) or 0))} g protein)"
+                for row in rows
+            ]
+            return "\n\nRECENT MEAL HISTORY (up to 14 days, newest first):\n" + "\n".join(lines)
+        except Exception as exc:
+            logger.warning("Failed to build meal history for %s: %s", user_id[:8], str(exc))
             return ""
 
     def get_progress_context(self, user_id: str, client: Client) -> str:
@@ -680,17 +772,19 @@ Speak like a real human coach having a conversation."""
             from datetime import date, timedelta
 
             start = (date.today() - timedelta(days=6)).isoformat()
-            workouts = client.table("workouts").select("date,muscle,exercises").eq("user_id", user_id).gte("date", start).order("date").execute().data or []
+            workouts = client.table("workouts").select("date,muscle,exercises,completed_at").eq("user_id", user_id).gte("date", start).order("date").execute().data or []
             meals = client.table("food_entries").select("date,protein,calories").eq("user_id", user_id).gte("date", start).execute().data or []
             form_sessions = client.table("form_sessions").select("exercise_name,reps,sets,form_score,created_at").eq("user_id", user_id).gte("created_at", f"{start}T00:00:00Z").order("created_at").execute().data or []
             meal_days = {row.get("date") for row in meals if row.get("date")}
             protein_total = sum(float(row.get("protein", 0) or 0) for row in meals)
             average_protein = round(protein_total / len(meal_days)) if meal_days else 0
-            workout_lines = [f"- {row.get('date')}: {row.get('muscle')} ({len(row.get('exercises') or [])} exercises)" for row in workouts[-7:]]
+            completed_workouts = [row for row in workouts if row.get("completed_at")]
+            workout_lines = [f"- {row.get('date')}: {row.get('muscle')} ({len(row.get('exercises') or [])} exercises) — {'completed' if row.get('completed_at') else 'planned only'}" for row in workouts[-7:]]
             form_lines = [f"- {row.get('exercise_name')}: {row.get('sets')} sets, {row.get('reps')} reps, {round(float(row.get('form_score', 0) or 0))}% form estimate" for row in form_sessions[-5:]]
             return (
                 "\n\nLAST 7 DAYS (evidence, not assumptions):\n"
-                f"Workout days logged: {len({row.get('date') for row in workouts})}/7\n"
+                f"Workout plans saved: {len({row.get('date') for row in workouts})}/7\n"
+                f"Workouts explicitly completed: {len(completed_workouts)}/7\n"
                 f"Food-log days: {len(meal_days)}/7\n"
                 f"Average protein on logged days: {average_protein} g\n"
                 + ("Recent workouts:\n" + "\n".join(workout_lines) + "\n" if workout_lines else "No workouts logged in this window.\n")
@@ -717,6 +811,7 @@ Speak like a real human coach having a conversation."""
             asyncio.to_thread(self.get_user_profile_context, user_id, client),
             asyncio.to_thread(self.get_workout_context, user_id, client),
             asyncio.to_thread(self.get_nutrition_context, user_id, client),
+            asyncio.to_thread(self.get_meal_history_context, user_id, client),
             asyncio.to_thread(self.get_progress_context, user_id, client),
         )
         system_prompt += "".join(contexts)
@@ -726,41 +821,49 @@ Speak like a real human coach having a conversation."""
             content = str(item.get("content", "")).strip()[:1200]
             if role in {"user", "assistant"} and content:
                 recent_history.append({"role": role, "content": content})
-        if not self.api_key:
+        providers = self._provider_configs()
+        if not providers:
             yield self.get_personalized_fallback(user_message, contexts[0], contexts[1], contexts[2])
             return
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "system", "content": system_prompt}, *recent_history, {"role": "user", "content": user_message}],
-            "temperature": 0.35,
-            "max_tokens": 260,
-            "stream": True,
-        }
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        for attempt in range(2):
-            emitted = False
-            try:
-                timeout = httpx.Timeout(35.0, connect=8.0, read=25.0)
-                async with httpx.AsyncClient(timeout=timeout) as http_client:
-                    async with http_client.stream("POST", self.api_url, headers=headers, json=payload) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            data = line[5:].strip()
-                            if not data or data == "[DONE]":
-                                continue
-                            chunk = json.loads(data)
-                            token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if token:
-                                emitted = True
-                                yield token
-                return
-            except (httpx.HTTPError, json.JSONDecodeError) as exc:
-                logger.warning("Streaming coach attempt %s failed: %s", attempt + 1, type(exc).__name__)
-                if emitted or attempt == 1:
-                    raise Exception("AI service is temporarily unavailable. Please try again later.") from exc
-                await asyncio.sleep(0.45)
+        last_error: Optional[Exception] = None
+        for provider in providers:
+            payload = {
+                "model": provider["model"],
+                "messages": [{"role": "system", "content": system_prompt}, *recent_history, {"role": "user", "content": user_message}],
+                "temperature": 0.35,
+                "max_tokens": 320,
+                "stream": True,
+            }
+            headers = {"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json"}
+            for attempt in range(2):
+                emitted = False
+                try:
+                    timeout = httpx.Timeout(40.0, connect=8.0, read=30.0)
+                    async with httpx.AsyncClient(timeout=timeout) as http_client:
+                        async with http_client.stream("POST", provider["url"], headers=headers, json=payload) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if not data or data == "[DONE]":
+                                    continue
+                                chunk = json.loads(data)
+                                token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if token:
+                                    emitted = True
+                                    self.last_provider = provider["name"]
+                                    yield token
+                    return
+                except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    logger.warning("%s streaming attempt %s failed: %s", provider["name"], attempt + 1, type(exc).__name__)
+                    if emitted:
+                        raise Exception("AI service is temporarily unavailable. Please try again later.") from exc
+                    if attempt == 0:
+                        await asyncio.sleep(0.35)
+            logger.warning("Switching Ojas coach provider after %s failed", provider["name"])
+        raise Exception("AI service is temporarily unavailable. Please try again later.") from last_error
 
     def get_personalized_fallback(
         self,
@@ -860,22 +963,22 @@ Speak like a real human coach having a conversation."""
             if nutrition_context:
                 system_prompt += nutrition_context
 
+            meal_history_context = self.get_meal_history_context(user_id, client)
+            if meal_history_context:
+                system_prompt += meal_history_context
+
             progress_context = self.get_progress_context(user_id, client)
             if progress_context:
                 system_prompt += progress_context
 
-        if not self.api_key:
+        providers = self._provider_configs()
+        if not providers:
             return self.get_personalized_fallback(
                 user_message=user_message,
                 profile_context=profile_context,
                 workout_context=workout_context,
                 nutrition_context=nutrition_context,
             )
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
         
         recent_history = []
         for item in (conversation_history or [])[-8:]:
@@ -884,66 +987,33 @@ Speak like a real human coach having a conversation."""
             if role in {"user", "assistant"} and content:
                 recent_history.append({"role": role, "content": content})
 
-        payload = {
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                *recent_history,
-                {
-                    "role": "user",
-                    "content": user_message
-                }
-            ],
-            "temperature": 0.4,  # Lower temp for better instruction following (formatting)
-            "max_tokens": 170,
-            "stream": False
-        }
-        
-        try:
-            logger.debug(f"Calling OpenRouter API with model: {self.model}")
-            
-            async with httpx.AsyncClient(timeout=self.timeout) as client_http:
-                response = await client_http.post(
-                    self.api_url,
-                    headers=headers,
-                    json=payload
-                )
-                
-                # Check for API errors
-                if response.status_code != 200:
-                    error_detail = response.text
-                    logger.warning(f"OpenRouter API error: {response.status_code} - {error_detail}")
-                    raise Exception("AI service is temporarily unavailable. Please try again later.")
-                
-                data = response.json()
-                
-                # Extract AI response
-                if "choices" in data and len(data["choices"]) > 0:
-                    ai_reply = data["choices"][0]["message"]["content"]
-                    logger.debug("OpenRouter response received successfully")
-                    
-                    # POST-PROCESSING: Force proper line breaks for emoji sections
-                    # This fixes the AI's tendency to write everything in one paragraph
-                    ai_reply = self._format_response_with_line_breaks(ai_reply)
-                    
-                    return ai_reply.strip()
-                else:
-                    logger.warning("OpenRouter returned no choices")
-                    raise Exception("AI service is temporarily unavailable. Please try again later.")
-                    
-        except httpx.TimeoutException:
-            logger.warning("OpenRouter request timed out")
-            raise Exception("AI service is temporarily unavailable. Please try again later.")
-        except httpx.RequestError as e:
-            logger.warning(f"OpenRouter network error: {type(e).__name__}")
-            raise Exception("AI service is temporarily unavailable. Please try again later.")
-        except Exception as e:
-            # If already our custom message, pass through
-            if "temporarily unavailable" in str(e):
-                raise
-            # Otherwise, log and return generic message
-            logger.error(f"OpenRouter unexpected error: {type(e).__name__}: {str(e)}")
-            raise Exception("AI service is temporarily unavailable. Please try again later.")
+        last_error: Optional[Exception] = None
+        for provider in providers:
+            payload = {
+                "model": provider["model"],
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    *recent_history,
+                    {"role": "user", "content": user_message},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 320,
+                "stream": False,
+            }
+            headers = {"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json"}
+            try:
+                logger.debug("Calling %s coach model %s", provider["name"], provider["model"])
+                async with httpx.AsyncClient(timeout=httpx.Timeout(35.0, connect=8.0)) as client_http:
+                    response = await client_http.post(provider["url"], headers=headers, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                ai_reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                if not ai_reply:
+                    raise ValueError("Provider returned no coach text")
+                self.last_provider = provider["name"]
+                return self._format_response_with_line_breaks(ai_reply).strip()
+            except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+                last_error = exc
+                logger.warning("%s coach request failed: %s", provider["name"], type(exc).__name__)
+                continue
+        raise Exception("AI service is temporarily unavailable. Please try again later.") from last_error

@@ -72,7 +72,8 @@ class WorkoutService:
             "date": today,
             "muscle": muscle,
             "exercises": exercises,
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "completed_at": None,
         }
         
         if existing:
@@ -88,3 +89,13 @@ class WorkoutService:
             return response.data[0]
         
         raise Exception("Failed to save workout")
+
+    async def complete_today_workout(self, user_id: str) -> Dict[str, Any]:
+        """Persist explicit workout completion so Ojas can use it as evidence."""
+        today = date.today().isoformat()
+        response = self.client.table("workouts").update({
+            "completed_at": datetime.utcnow().isoformat()
+        }).eq("user_id", user_id).eq("date", today).execute()
+        if response.data:
+            return response.data[0]
+        raise Exception("No saved workout found for today")
