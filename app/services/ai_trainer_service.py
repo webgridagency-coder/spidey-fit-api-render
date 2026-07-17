@@ -831,9 +831,14 @@ Speak like a real human coach having a conversation."""
                 "model": provider["model"],
                 "messages": [{"role": "system", "content": system_prompt}, *recent_history, {"role": "user", "content": user_message}],
                 "temperature": 0.35,
-                "max_tokens": 320,
+                "max_tokens": 600,
                 "stream": True,
             }
+            if provider["name"] == "gemini":
+                # Gemini 2.5 counts internal thinking against max_tokens. Ojas
+                # needs fast, complete grounded chat answers, not hidden chain
+                # of thought that can consume the whole response allowance.
+                payload["reasoning_effort"] = "none"
             headers = {"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json"}
             for attempt in range(2):
                 emitted = False
@@ -997,9 +1002,11 @@ Speak like a real human coach having a conversation."""
                     {"role": "user", "content": user_message},
                 ],
                 "temperature": 0.4,
-                "max_tokens": 320,
+                "max_tokens": 600,
                 "stream": False,
             }
+            if provider["name"] == "gemini":
+                payload["reasoning_effort"] = "none"
             headers = {"Authorization": f"Bearer {provider['key']}", "Content-Type": "application/json"}
             try:
                 logger.debug("Calling %s coach model %s", provider["name"], provider["model"])
