@@ -6,12 +6,40 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.database import get_supabase_service
 from app.dependencies import get_current_user
-from app.schemas.workout import WorkoutCreate, WorkoutResponse
+from app.schemas.workout import FormSessionCreate, FormSessionResponse, WorkoutCreate, WorkoutResponse
 from app.services.workout_service import WorkoutService
 from supabase import Client
 
 
 router = APIRouter()
+
+SUPPORTED_FORM_EXERCISES = {
+    "Push-ups", "Squats", "Lunges", "Shoulder Press", "Bicep Curls", "Plank",
+}
+
+
+@router.post("/form-sessions", response_model=FormSessionResponse, status_code=status.HTTP_201_CREATED)
+async def create_form_session(
+    session: FormSessionCreate,
+    user: dict = Depends(get_current_user),
+    client: Client = Depends(get_supabase_service),
+):
+    if session.exercise_name not in SUPPORTED_FORM_EXERCISES:
+        raise HTTPException(status_code=422, detail="This movement is not supported by the calibrated form tracker")
+    payload = {"user_id": user["id"], **session.model_dump()}
+    response = client.table("form_sessions").insert(payload).execute()
+    if not response.data:
+        raise HTTPException(status_code=503, detail="Form-session sync is temporarily unavailable")
+    return response.data[0]
+
+
+@router.get("/form-sessions/recent", response_model=list[FormSessionResponse])
+async def get_recent_form_sessions(
+    user: dict = Depends(get_current_user),
+    client: Client = Depends(get_supabase_service),
+):
+    response = client.table("form_sessions").select("*").eq("user_id", user["id"]).order("created_at", desc=True).limit(30).execute()
+    return response.data or []
 
 
 @router.post("", response_model=WorkoutResponse, status_code=status.HTTP_201_CREATED)

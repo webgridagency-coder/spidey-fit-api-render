@@ -117,7 +117,7 @@ Do not include any text outside the JSON object."""
             logger.error(f"Unexpected error in text estimation: {e}")
             raise ValueError(f"Failed to process nutrition estimation: {str(e)}")
     
-    async def estimate_from_image(self, image_bytes: bytes) -> Dict[str, Any]:
+    async def estimate_from_image(self, image_bytes: bytes, mime_type: str = "image/jpeg", portion_hint: str = "") -> Dict[str, Any]:
         """
         Estimate nutrition from food image
         
@@ -146,11 +146,12 @@ Do not include any text outside the JSON object."""
                     "contents": [{
                         "parts": [
                             {
-                                "text": self.NUTRITION_PROMPT + "\n\nAnalyze the food in this image and provide nutrition estimates:"
+                                "text": self.NUTRITION_PROMPT + "\n\nAnalyze the food in this image and provide nutrition estimates. "
+                                + (f"The user supplied this portion/ingredient reference: {portion_hint[:240]}" if portion_hint else "Use visible serving size and clearly state uncertainty.")
                             },
                             {
                                 "inline_data": {
-                                    "mime_type": "image/jpeg",
+                                    "mime_type": mime_type,
                                     "data": image_base64
                                 }
                             }

@@ -3,7 +3,7 @@ Trainer Pydantic schemas for request/response validation
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 
 class TrainerConversationMessage(BaseModel):
@@ -14,7 +14,10 @@ class TrainerConversationMessage(BaseModel):
 class TrainerQuotaResponse(BaseModel):
     """Schema for trainer quota response"""
     messages_used: int = Field(..., ge=0, description="Number of messages used today")
-    messages_remaining: int = Field(..., ge=0, description="Number of messages remaining today")
+    messages_remaining: Optional[int] = Field(..., ge=0, description="Remaining allowance; null means unlimited")
+    plan: Literal["base", "flow", "orbit"] = "base"
+    period: Literal["day", "month", "unlimited"] = "day"
+    limit: Optional[int] = Field(default=5, ge=1)
 
     class Config:
         json_schema_extra = {
@@ -29,7 +32,7 @@ class TrainerUseResponse(BaseModel):
     """Schema for trainer use response"""
     success: bool
     messages_used: int
-    messages_remaining: int
+    messages_remaining: Optional[int]
     message: str
 
     class Config:
@@ -60,7 +63,10 @@ class TrainerChatResponse(BaseModel):
     """Schema for trainer chat response"""
     reply: str = Field(..., description="AI trainer's response")
     messages_used: int = Field(..., ge=0, description="Total messages used today")
-    messages_remaining: int = Field(..., ge=0, description="Messages remaining today")
+    messages_remaining: Optional[int] = Field(..., ge=0, description="Remaining allowance; null means unlimited")
+    plan: Literal["base", "flow", "orbit"] = "base"
+    period: Literal["day", "month", "unlimited"] = "day"
+    request_id: Optional[str] = None
 
     class Config:
         json_schema_extra = {

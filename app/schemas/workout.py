@@ -2,8 +2,8 @@
 Workout Pydantic schemas for request/response validation
 """
 
-from datetime import date
-from typing import List, Optional
+from datetime import date, datetime
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -46,3 +46,20 @@ class WorkoutResponse(BaseModel):
                 "created_at": "2025-12-31T10:30:00Z"
             }
         }
+
+
+class FormSessionCreate(BaseModel):
+    exercise_name: str = Field(..., min_length=2, max_length=100)
+    reps: int = Field(..., ge=1, le=1000)
+    sets: int = Field(..., ge=0, le=100)
+    duration_seconds: int = Field(..., ge=0, le=21600)
+    form_score: float = Field(..., ge=0, le=100)
+    calories: float = Field(default=0, ge=0, le=5000)
+    device_label: Optional[str] = Field(default=None, max_length=120)
+    confidence_level: Literal["low", "estimated", "high"] = "estimated"
+
+
+class FormSessionResponse(FormSessionCreate):
+    id: str
+    user_id: str
+    created_at: datetime

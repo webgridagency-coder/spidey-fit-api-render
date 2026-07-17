@@ -3,6 +3,7 @@ Trainer service layer - handles message quota business logic
 """
 
 from datetime import date, datetime
+from calendar import monthrange
 from typing import Dict, Any
 from supabase import Client
 
@@ -10,10 +11,30 @@ from supabase import Client
 class TrainerService:
     """Service for trainer message quota operations"""
     
-    MAX_MESSAGES_PER_DAY = 5
+    PLAN_RULES = {
+        "base": {"limit": 5, "period": "day"},
+        "flow": {"limit": 50, "period": "month"},
+        "orbit": {"limit": None, "period": "unlimited"},
+    }
     
     def __init__(self, supabase_client: Client):
         self.client = supabase_client
+
+    def get_plan(self, user_id: str) -> str:
+        response = self.client.table("ojas_accounts").select("plan").eq("id", user_id).limit(1).execute()
+        plan = (response.data or [{}])[0].get("plan", "base")
+        return plan if plan in self.PLAN_RULES else "base"
+
+    def get_period_usage(self, user_id: str, plan: str) -> int:
+        rule = self.PLAN_RULES[plan]
+        if rule["period"] == "day":
+            start = end = date.today().isoformat()
+        else:
+            today = date.today()
+            start = today.replace(day=1).isoformat()
+            end = today.replace(day=monthrange(today.year, today.month)[1]).isoformat()
+        response = self.client.table("trainer_usage").select("messages_used").eq("user_id", user_id).gte("date", start).lte("date", end).execute()
+        return sum(int(row.get("messages_used", 0) or 0) for row in (response.data or []))
     
     async def get_or_create_usage(self, user_id: str) -> Dict[str, Any]:
         """
@@ -71,13 +92,18 @@ class TrainerService:
         Returns:
             Dict with messages_used and messages_remaining
         """
-        usage = await self.get_or_create_usage(user_id)
-        messages_used = usage.get("messages_used", 0)
-        messages_remaining = max(0, self.MAX_MESSAGES_PER_DAY - messages_used)
+        await self.get_or_create_usage(user_id)
+        plan = self.get_plan(user_id)
+        rule = self.PLAN_RULES[plan]
+        messages_used = self.get_period_usage(user_id, plan)
+        messages_remaining = None if rule["limit"] is None else max(0, rule["limit"] - messages_used)
         
         return {
             "messages_used": messages_used,
-            "messages_remaining": messages_remaining
+            "messages_remaining": messages_remaining,
+            "plan": plan,
+            "period": rule["period"],
+            "limit": rule["limit"],
         }
     
     async def increment_usage(self, user_id: str) -> Dict[str, Any]:
@@ -94,17 +120,20 @@ class TrainerService:
             Exception: If daily limit exceeded
         """
         usage = await self.get_or_create_usage(user_id)
-        messages_used = usage.get("messages_used", 0)
+        plan = self.get_plan(user_id)
+        rule = self.PLAN_RULES[plan]
+        messages_used = self.get_period_usage(user_id, plan)
         
         # Enforce limit
-        if messages_used >= self.MAX_MESSAGES_PER_DAY:
+        if rule["limit"] is not None and messages_used >= rule["limit"]:
             raise Exception("Daily message limit exceeded")
         
         # Increment
+        daily_count = int(usage.get("messages_used", 0) or 0) + 1
         new_count = messages_used + 1
         
         update_data = {
-            "messages_used": new_count,
+            "messages_used": daily_count,
             "updated_at": datetime.utcnow().isoformat()
         }
         
@@ -115,7 +144,10 @@ class TrainerService:
         if response.data and len(response.data) > 0:
             return {
                 "messages_used": new_count,
-                "messages_remaining": self.MAX_MESSAGES_PER_DAY - new_count
+                "messages_remaining": None if rule["limit"] is None else max(0, rule["limit"] - new_count),
+                "plan": plan,
+                "period": rule["period"],
+                "limit": rule["limit"],
             }
         
         raise Exception("Failed to update usage")

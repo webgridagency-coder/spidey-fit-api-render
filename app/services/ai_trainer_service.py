@@ -5,9 +5,11 @@ Includes user profile and workout catalog personalization
 """
 
 import httpx
+import asyncio
+import json
 import logging
 import re
-from typing import Dict, Any, Optional
+from typing import AsyncIterator, Dict, Any, Optional
 from supabase import Client
 
 from app.config import settings
@@ -470,7 +472,7 @@ Speak like a real human coach having a conversation."""
                         formatted.append('')
         return '\n'.join(formatted).strip()
     
-    async def get_user_profile_context(self, user_id: str, client: Client) -> str:
+    def get_user_profile_context(self, user_id: str, client: Client) -> str:
         """
         Fetch user profile and format it as context for AI personalization.
         
@@ -575,7 +577,7 @@ Speak like a real human coach having a conversation."""
             logger.warning(f"Failed to fetch profile for user {user_id[:8]}...: {str(e)}")
             return ""
     
-    async def get_workout_context(self, user_id: str, client: Client) -> str:
+    def get_workout_context(self, user_id: str, client: Client) -> str:
         """
         Fetch user's available workout exercises and format as context.
         
@@ -644,7 +646,7 @@ Speak like a real human coach having a conversation."""
             logger.warning(f"Failed to fetch workout for user {user_id[:8]}...: {str(e)}")
             return ""
 
-    async def get_nutrition_context(self, user_id: str, client: Client) -> str:
+    def get_nutrition_context(self, user_id: str, client: Client) -> str:
         """Return today's real nutrition totals and meal count for grounded coaching."""
         try:
             from datetime import date
@@ -670,6 +672,94 @@ Speak like a real human coach having a conversation."""
         except Exception as e:
             logger.warning(f"Failed to fetch nutrition context for user {user_id[:8]}...: {str(e)}")
             return ""
+
+    def get_progress_context(self, user_id: str, client: Client) -> str:
+        """Summarize recent adherence and progression signals for longitudinal coaching."""
+        try:
+            from datetime import date, timedelta
+
+            start = (date.today() - timedelta(days=6)).isoformat()
+            workouts = client.table("workouts").select("date,muscle,exercises").eq("user_id", user_id).gte("date", start).order("date").execute().data or []
+            meals = client.table("food_entries").select("date,protein,calories").eq("user_id", user_id).gte("date", start).execute().data or []
+            form_sessions = client.table("form_sessions").select("exercise_name,reps,sets,form_score,created_at").eq("user_id", user_id).gte("created_at", f"{start}T00:00:00Z").order("created_at").execute().data or []
+            meal_days = {row.get("date") for row in meals if row.get("date")}
+            protein_total = sum(float(row.get("protein", 0) or 0) for row in meals)
+            average_protein = round(protein_total / len(meal_days)) if meal_days else 0
+            workout_lines = [f"- {row.get('date')}: {row.get('muscle')} ({len(row.get('exercises') or [])} exercises)" for row in workouts[-7:]]
+            form_lines = [f"- {row.get('exercise_name')}: {row.get('sets')} sets, {row.get('reps')} reps, {round(float(row.get('form_score', 0) or 0))}% form estimate" for row in form_sessions[-5:]]
+            return (
+                "\n\nLAST 7 DAYS (evidence, not assumptions):\n"
+                f"Workout days logged: {len({row.get('date') for row in workouts})}/7\n"
+                f"Food-log days: {len(meal_days)}/7\n"
+                f"Average protein on logged days: {average_protein} g\n"
+                + ("Recent workouts:\n" + "\n".join(workout_lines) + "\n" if workout_lines else "No workouts logged in this window.\n")
+                + ("Recent camera sessions:\n" + "\n".join(form_lines) if form_lines else "No camera-form sessions logged in this window.")
+                + "\nWhen recommending a change, include a short 'Why this changed' section citing one or two signals above. Treat missing days as unlogged, not skipped."
+            )
+        except Exception as exc:
+            logger.warning("Failed to build progress context for %s: %s", user_id[:8], str(exc))
+            return ""
+
+    async def stream_ai_response(
+        self,
+        user_message: str,
+        user_id: str,
+        client: Client,
+        conversation_history: Optional[list[Dict[str, str]]] = None,
+        fresh_profile_data: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[str]:
+        """Yield real provider tokens with one safe retry before the first token."""
+        system_prompt = self.BASE_SYSTEM_PROMPT
+        if fresh_profile_data:
+            system_prompt += "\n\nNEW USER DATA FROM THIS MESSAGE:\n" + "\n".join(f"{key}: {value}" for key, value in fresh_profile_data.items())
+        contexts = await asyncio.gather(
+            asyncio.to_thread(self.get_user_profile_context, user_id, client),
+            asyncio.to_thread(self.get_workout_context, user_id, client),
+            asyncio.to_thread(self.get_nutrition_context, user_id, client),
+            asyncio.to_thread(self.get_progress_context, user_id, client),
+        )
+        system_prompt += "".join(contexts)
+        recent_history = []
+        for item in (conversation_history or [])[-8:]:
+            role = item.get("role")
+            content = str(item.get("content", "")).strip()[:1200]
+            if role in {"user", "assistant"} and content:
+                recent_history.append({"role": role, "content": content})
+        if not self.api_key:
+            yield self.get_personalized_fallback(user_message, contexts[0], contexts[1], contexts[2])
+            return
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system_prompt}, *recent_history, {"role": "user", "content": user_message}],
+            "temperature": 0.35,
+            "max_tokens": 260,
+            "stream": True,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        for attempt in range(2):
+            emitted = False
+            try:
+                timeout = httpx.Timeout(35.0, connect=8.0, read=25.0)
+                async with httpx.AsyncClient(timeout=timeout) as http_client:
+                    async with http_client.stream("POST", self.api_url, headers=headers, json=payload) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data or data == "[DONE]":
+                                continue
+                            chunk = json.loads(data)
+                            token = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if token:
+                                emitted = True
+                                yield token
+                return
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                logger.warning("Streaming coach attempt %s failed: %s", attempt + 1, type(exc).__name__)
+                if emitted or attempt == 1:
+                    raise Exception("AI service is temporarily unavailable. Please try again later.") from exc
+                await asyncio.sleep(0.45)
 
     def get_personalized_fallback(
         self,
@@ -756,18 +846,22 @@ Speak like a real human coach having a conversation."""
         
         if user_id and client:
             # Add profile context (age, goal, injuries, etc.)
-            profile_context = await self.get_user_profile_context(user_id, client)
+            profile_context = self.get_user_profile_context(user_id, client)
             if profile_context:
                 system_prompt += profile_context
             
             # Add workout context (available exercises)
-            workout_context = await self.get_workout_context(user_id, client)
+            workout_context = self.get_workout_context(user_id, client)
             if workout_context:
                 system_prompt += workout_context
 
-            nutrition_context = await self.get_nutrition_context(user_id, client)
+            nutrition_context = self.get_nutrition_context(user_id, client)
             if nutrition_context:
                 system_prompt += nutrition_context
+
+            progress_context = self.get_progress_context(user_id, client)
+            if progress_context:
+                system_prompt += progress_context
 
         if not self.api_key:
             return self.get_personalized_fallback(

@@ -2,8 +2,12 @@
 Trainer API routes - message quota enforcement and AI chat
 """
 
+import json
 import logging
+import time
+import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from supabase import Client
 
 logger = logging.getLogger(__name__)
@@ -117,7 +121,7 @@ async def chat_with_trainer(
         # Step 1: Check current quota
         quota = await trainer_service.get_quota(user["id"])
         
-        if quota["messages_remaining"] <= 0:
+        if quota["messages_remaining"] is not None and quota["messages_remaining"] <= 0:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
@@ -188,7 +192,9 @@ async def chat_with_trainer(
         return {
             "reply": ai_reply,
             "messages_used": usage["messages_used"],
-            "messages_remaining": usage["messages_remaining"]
+            "messages_remaining": usage["messages_remaining"],
+            "plan": usage["plan"],
+            "period": usage["period"],
         }
         
     except HTTPException:
@@ -200,3 +206,58 @@ async def chat_with_trainer(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process chat request: {str(e)}"
         )
+
+
+@router.post("/chat/stream")
+async def stream_chat_with_trainer(
+    request: TrainerChatRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Stream coach tokens as server-sent events with request timing metadata."""
+    from app.database import SupabaseClient
+
+    client = SupabaseClient.get_service_client()
+    trainer_service = TrainerService(client)
+    quota = await trainer_service.get_quota(user["id"])
+    if quota["messages_remaining"] is not None and quota["messages_remaining"] <= 0:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Coaching allowance reached")
+    usage = await trainer_service.increment_usage(user["id"])
+    request_id = uuid.uuid4().hex[:12]
+    started = time.monotonic()
+    extractor = ProfileExtractorService()
+    fresh_profile_data = extractor.extract_profile_data_fast(request.message)
+    if fresh_profile_data:
+        await extractor.save_profile_data(user_id=user["id"], profile_data=fresh_profile_data, client=client)
+
+    async def event_stream():
+        first_token_at = None
+        full_reply = []
+        try:
+            yield f"event: meta\ndata: {json.dumps({'request_id': request_id, **usage})}\n\n"
+            # Push headers/meta through buffering proxies before provider tokens arrive.
+            yield ":" + (" " * 2048) + "\n\n"
+            service = AITrainerService()
+            async for token in service.stream_ai_response(
+                user_message=request.message,
+                user_id=user["id"],
+                client=client,
+                fresh_profile_data=fresh_profile_data or None,
+                conversation_history=[{"role": item.role, "content": item.content} for item in request.history],
+            ):
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                full_reply.append(token)
+                yield f"event: delta\ndata: {json.dumps({'text': token})}\n\n"
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            first_token_ms = round(((first_token_at or time.monotonic()) - started) * 1000)
+            logger.info("coach_stream_complete request_id=%s user=%s first_token_ms=%s total_ms=%s chars=%s", request_id, user["id"][:8], first_token_ms, elapsed_ms, len("".join(full_reply)))
+            yield f"event: done\ndata: {json.dumps({'request_id': request_id, 'first_token_ms': first_token_ms, 'total_ms': elapsed_ms})}\n\n"
+        except Exception:
+            logger.exception("coach_stream_failed request_id=%s user=%s", request_id, user["id"][:8])
+            yield f"event: error\ndata: {json.dumps({'request_id': request_id, 'message': 'Ojas could not finish this reply. Try again.'})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no", "Content-Encoding": "none", "Connection": "keep-alive", "X-Request-ID": request_id},
+    )

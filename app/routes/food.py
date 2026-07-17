@@ -55,6 +55,30 @@ class TodayStatusResponse(BaseModel):
     food_entries: List[Dict[str, Any]]
 
 
+class FoodPreviewResponse(BaseModel):
+    calories: float
+    protein: float
+    carbs: float
+    fats: float
+    confidence_note: str
+    remaining_credits: int
+    meal_type: str
+    description: str
+    source: str
+
+
+class FoodConfirmRequest(BaseModel):
+    meal_type: str
+    description: str = Field(..., min_length=2, max_length=500)
+    calories: float = Field(..., ge=0, le=10000)
+    protein: float = Field(..., ge=0, le=1000)
+    carbs: float = Field(..., ge=0, le=2000)
+    fats: float = Field(..., ge=0, le=1000)
+    fiber: float = Field(default=0, ge=0, le=500)
+    confidence_note: str = Field(default="User reviewed AI estimate", max_length=1000)
+    source: str = Field(default="ai_image", pattern="^(ai_text|ai_image|manual)$")
+
+
 @router.post("/estimate/text", response_model=FoodEstimateResponse, status_code=status.HTTP_200_OK)
 async def estimate_food_from_text(
     request: FoodEstimateTextRequest,
@@ -204,7 +228,7 @@ async def estimate_food_from_image(
         
         # Perform AI estimation
         ai_service = FoodAIService()
-        result = await ai_service.estimate_from_image(image_bytes)
+        result = await ai_service.estimate_from_image(image_bytes, image.content_type)
         
         # Save food entry to database
         await food_entry_service.save_food_entry(
@@ -252,6 +276,84 @@ async def estimate_food_from_image(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI analysis temporarily unavailable"
         )
+
+
+@router.post("/estimate/image/preview", response_model=FoodPreviewResponse)
+async def preview_food_from_image(
+    image: UploadFile = File(...),
+    meal_type: str = Form(...),
+    portion_hint: str = Form(default=""),
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_service),
+):
+    """Analyze a photo without saving it; the user confirms and edits the estimate next."""
+    if meal_type not in {"breakfast", "lunch", "dinner", "snacks"}:
+        raise HTTPException(status_code=400, detail="Invalid meal type")
+    if not image.content_type or image.content_type not in {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}:
+        raise HTTPException(status_code=400, detail="Use a JPEG, PNG, WebP or HEIC food image")
+    image_bytes = await image.read()
+    if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be between 1 byte and 10MB")
+    credit_service = CreditService(supabase)
+    if await credit_service.check_remaining_credits(user["id"]) <= 0:
+        raise HTTPException(status_code=402, detail="Daily AI estimate allowance reached")
+    description_hint = portion_hint.strip()[:240]
+    try:
+        result = await FoodAIService().estimate_from_image(image_bytes, image.content_type, description_hint)
+    except Exception as exc:
+        logger.warning("Food photo preview failed for user %s: %s", user["id"][:8], type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Photo analysis is taking longer than expected. Try again with a clear, well-lit image.") from exc
+    credit_info = await credit_service.consume_credit(user["id"])
+    return FoodPreviewResponse(
+        **result,
+        remaining_credits=credit_info["remaining_credits"],
+        meal_type=meal_type,
+        description=description_hint or f"Food photo · {image.filename or 'meal'}",
+        source="ai_image",
+    )
+
+
+@router.post("/entries/confirm", response_model=TodayStatusResponse, status_code=status.HTTP_201_CREATED)
+async def confirm_food_entry(
+    request: FoodConfirmRequest,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_service),
+):
+    """Save user-reviewed AI values or a manual meal entry."""
+    if request.meal_type not in {"breakfast", "lunch", "dinner", "snacks"}:
+        raise HTTPException(status_code=400, detail="Invalid meal type")
+    service = FoodEntryService(supabase)
+    await service.save_food_entry(
+        user_id=user["id"], meal_type=request.meal_type, calories=request.calories,
+        protein=request.protein, carbs=request.carbs, fats=request.fats, fiber=request.fiber,
+        source=request.source, confidence_note=request.confidence_note, description=request.description,
+    )
+    totals = await service.get_daily_nutrition_totals(user["id"])
+    entries = await service.get_today_entries(user["id"])
+    credits = await CreditService(supabase).check_remaining_credits(user["id"])
+    return TodayStatusResponse(remaining_credits=credits, daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
+
+
+@router.put("/entries/{entry_id}", response_model=TodayStatusResponse)
+async def update_food_entry(
+    entry_id: str,
+    request: FoodConfirmRequest,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_service),
+):
+    existing = supabase.table("food_entries").select("id").eq("id", entry_id).eq("user_id", user["id"]).limit(1).execute().data
+    if not existing:
+        raise HTTPException(status_code=404, detail="Meal entry not found")
+    supabase.table("food_entries").update({
+        "meal_type": request.meal_type, "description": request.description,
+        "calories": request.calories, "protein": request.protein, "carbs": request.carbs,
+        "fats": request.fats, "fiber": request.fiber, "confidence_note": request.confidence_note,
+    }).eq("id", entry_id).eq("user_id", user["id"]).execute()
+    service = FoodEntryService(supabase)
+    totals = await service.get_daily_nutrition_totals(user["id"])
+    entries = await service.get_today_entries(user["id"])
+    credits = await CreditService(supabase).check_remaining_credits(user["id"])
+    return TodayStatusResponse(remaining_credits=credits, daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
 
 
 @router.get("/today", response_model=TodayStatusResponse, status_code=status.HTTP_200_OK)
