@@ -92,10 +92,17 @@ class WorkoutService:
 
     async def complete_today_workout(self, user_id: str) -> Dict[str, Any]:
         """Persist explicit workout completion so Ojas can use it as evidence."""
-        today = date.today().isoformat()
+        workout = await self.get_today_workout(user_id)
+        if not workout:
+            raise Exception("No saved workout found for today")
+
+        completed_at = datetime.utcnow().isoformat()
         response = self.client.table("workouts").update({
-            "completed_at": datetime.utcnow().isoformat()
-        }).eq("user_id", user_id).eq("date", today).execute()
+            "completed_at": completed_at
+        }).eq("id", workout["id"]).eq("user_id", user_id).execute()
         if response.data:
             return response.data[0]
-        raise Exception("No saved workout found for today")
+
+        # Some PostgREST configurations do not return the updated row. The
+        # write still succeeded, so return the known workout with its new state.
+        return {**workout, "completed_at": completed_at}
