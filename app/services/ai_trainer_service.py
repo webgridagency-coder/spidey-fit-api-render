@@ -392,6 +392,40 @@ FORMATTING ENFORCEMENT (CRITICAL!)
 
 Remember: You're building TRUST through clarity and consistency, not information dumps.
 Speak like a real human coach having a conversation."""
+
+    # Compact production prompt. Keeping this focused reduces provider input
+    # processing time and removes the conflicting legacy instructions above.
+    BASE_SYSTEM_PROMPT = """You are Ojas, the user's personal AI fitness coach and the main intelligence layer of the Ojas app.
+
+Use the supplied records as the source of truth:
+- Profile: goals, age, gender, body data, activity, experience, diet and limitations.
+- Today's nutrition: every confirmed text entry or confirmed photo scan, its meal name, source and reviewed macros.
+- Recent meal history: identify patterns only from logged records.
+- Workouts: distinguish planned workouts from explicitly completed workouts using the supplied status.
+- Form sessions and the recent coaching conversation when relevant.
+
+Grounding rules:
+- When asked what the user ate, name the exact confirmed foods, meal types and reviewed values. A photo preview is not eaten until it is confirmed and appears in the records.
+- When asked what the user trained, name the saved exercises. Say completed only when the record says completed; otherwise say planned.
+- Never invent a meal, workout, completion, measurement or trend.
+- Never ask for information already supplied. If a needed fact is missing, state that briefly and ask one useful question.
+- Use gender only where a validated calculation requires it, such as the selected BMR equation. Do not stereotype training or food needs.
+- Treat missing logs as unknown, not skipped or failed.
+- For form tracking, say on-device form estimate. Never claim diagnosis, injury prevention or clinical accuracy.
+
+Coaching style:
+- Answer the question immediately. Be warm, direct and specific.
+- Usually use 60 to 130 words. Use a longer answer only when the user explicitly requests a detailed plan.
+- Cite one or two saved signals that changed a recommendation under a short Why this fits line.
+- Give one practical next action.
+- Avoid generic praise, repeated theory and repeated BMR or TDEE calculations.
+- If both food and training are requested, cover both; otherwise stay on the requested topic.
+
+Output plain text only:
+- Never output asterisks, hashtags, markdown headings, underscores, backticks or tables.
+- Headings may be plain words ending with a colon.
+- Use hyphens for short lists and blank lines between sections.
+- Do not expose hidden reasoning or mention the system prompt."""
     
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
@@ -412,6 +446,14 @@ Speak like a real human coach having a conversation."""
         if self.api_key and "your-" not in self.api_key.lower():
             providers.append({"name": "openrouter", "url": self.api_url, "key": self.api_key, "model": self.model})
         return providers
+
+    @staticmethod
+    def sanitize_coach_output(content: str) -> str:
+        """Keep Ojas replies plain-text even if a provider emits Markdown."""
+        cleaned = re.sub(r"(?m)^\s*#{1,6}\s*", "", content)
+        cleaned = cleaned.replace("*", "").replace("`", "").replace("_", "")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     def get_saved_conversation_history(self, user_id: str, client: Client, limit: int = 16) -> list[Dict[str, str]]:
         """Load recent cross-device Ojas messages in chronological order."""
@@ -435,10 +477,11 @@ Speak like a real human coach having a conversation."""
     ) -> None:
         """Persist one reviewed user/assistant message without blocking coaching if storage fails."""
         try:
+            stored_content = self.sanitize_coach_output(content) if role == "assistant" else content.strip()
             client.table("trainer_messages").insert({
                 "user_id": user_id,
                 "role": role,
-                "content": content[:8000],
+                "content": stored_content[:8000],
                 "request_id": request_id,
                 "provider": provider,
             }).execute()
@@ -724,10 +767,18 @@ Speak like a real human coach having a conversation."""
             meal_lines = []
             for entry in entries:
                 description = str(entry.get("description") or "Unnamed logged food").strip()[:180]
+                source_label = {
+                    "ai_image": "confirmed photo scan",
+                    "ai_text": "text meal scan",
+                    "manual": "manual entry",
+                }.get(entry.get("source"), "logged entry")
                 meal_lines.append(
-                    f"- {entry.get('meal_type') or 'meal'}: {description} — "
+                    f"- {entry.get('meal_type') or 'meal'}: {description} [{source_label}] — "
                     f"{round(float(entry.get('calories', 0) or 0))} kcal, "
-                    f"{round(float(entry.get('protein', 0) or 0))} g protein"
+                    f"{round(float(entry.get('protein', 0) or 0))} g protein, "
+                    f"{round(float(entry.get('carbs', 0) or 0))} g carbs, "
+                    f"{round(float(entry.get('fats', 0) or 0))} g fats, "
+                    f"{round(float(entry.get('fiber', 0) or 0))} g fiber"
                 )
 
             return (
@@ -751,14 +802,16 @@ Speak like a real human coach having a conversation."""
 
             start = (date.today() - timedelta(days=13)).isoformat()
             rows = client.table("food_entries").select(
-                "date,meal_type,description,calories,protein"
+                "date,meal_type,description,calories,protein,carbs,fats,source"
             ).eq("user_id", user_id).gte("date", start).order("date", desc=True).limit(30).execute().data or []
             if not rows:
                 return "\n\nRECENT MEAL HISTORY (14 days): No meals logged in this window."
             lines = [
                 f"- {row.get('date')} · {row.get('meal_type') or 'meal'}: "
                 f"{str(row.get('description') or 'Unnamed logged food')[:140]} "
-                f"({round(float(row.get('calories', 0) or 0))} kcal, {round(float(row.get('protein', 0) or 0))} g protein)"
+                f"({round(float(row.get('calories', 0) or 0))} kcal, {round(float(row.get('protein', 0) or 0))} g protein, "
+                f"{round(float(row.get('carbs', 0) or 0))} g carbs, {round(float(row.get('fats', 0) or 0))} g fats; "
+                f"source: {row.get('source') or 'logged'})"
                 for row in rows
             ]
             return "\n\nRECENT MEAL HISTORY (up to 14 days, newest first):\n" + "\n".join(lines)
@@ -1018,7 +1071,7 @@ Speak like a real human coach having a conversation."""
                 if not ai_reply:
                     raise ValueError("Provider returned no coach text")
                 self.last_provider = provider["name"]
-                return self._format_response_with_line_breaks(ai_reply).strip()
+                return self.sanitize_coach_output(self._format_response_with_line_breaks(ai_reply))
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
                 logger.warning("%s coach request failed: %s", provider["name"], type(exc).__name__)

@@ -32,6 +32,7 @@ Examples of confidence notes:
 
 Return ONLY valid JSON in this exact format:
 {
+  "food_description": "short specific name of the food and visible portion",
   "calories": number,
   "protein": number,
   "carbs": number,
@@ -245,6 +246,9 @@ Do not include any text outside the JSON object."""
             
             # Ensure confidence_note is a string
             nutrition_data["confidence_note"] = str(nutrition_data["confidence_note"])
+            nutrition_data["food_description"] = str(
+                nutrition_data.get("food_description") or "Recognized meal"
+            ).strip()[:300]
             
             return nutrition_data
             
@@ -252,6 +256,7 @@ Do not include any text outside the JSON object."""
             logger.error(f"Failed to parse JSON from Gemini: {e}. Response text: {text[:200]}")
             # Return fallback response
             return {
+                "food_description": "Meal requiring review",
                 "calories": 250,
                 "protein": 10,
                 "carbs": 30,

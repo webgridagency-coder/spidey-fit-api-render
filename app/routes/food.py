@@ -241,7 +241,7 @@ async def estimate_food_from_image(
             fiber=0.0,  # Gemini doesn't estimate fiber yet
             source='ai_image',
             confidence_note=result['confidence_note'],
-            description=f"Food photo upload - {image.filename}"
+            description=result.get("food_description") or f"Food photo upload - {image.filename}"
         )
         
         # Consume credit after successful estimation
@@ -304,11 +304,16 @@ async def preview_food_from_image(
         logger.warning("Food photo preview failed for user %s: %s", user["id"][:8], type(exc).__name__)
         raise HTTPException(status_code=503, detail="Photo analysis is taking longer than expected. Try again with a clear, well-lit image.") from exc
     credit_info = await credit_service.consume_credit(user["id"])
+    detected_food = str(result.get("food_description") or "").strip()
+    if description_hint and detected_food:
+        reviewed_description = f"{detected_food} · Portion note: {description_hint}"
+    else:
+        reviewed_description = detected_food or description_hint or f"Food photo · {image.filename or 'meal'}"
     return FoodPreviewResponse(
         **result,
         remaining_credits=credit_info["remaining_credits"],
         meal_type=meal_type,
-        description=description_hint or f"Food photo · {image.filename or 'meal'}",
+        description=reviewed_description[:500],
         source="ai_image",
     )
 
