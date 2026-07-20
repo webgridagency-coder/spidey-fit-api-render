@@ -277,22 +277,22 @@ async def stream_chat_with_trainer(
             yield f"event: meta\ndata: {json.dumps({'request_id': request_id, **usage})}\n\n"
             # Push headers/meta through buffering proxies before provider tokens arrive.
             yield ":" + (" " * 2048) + "\n\n"
-            history_task = asyncio.to_thread(service.get_saved_conversation_history, user["id"], client)
-            save_user_task = asyncio.to_thread(
+            # The browser already sends the recent visible thread. Persist the
+            # new message/profile concurrently instead of blocking Gemini's
+            # first token on two unrelated database writes.
+            maintenance_tasks = [asyncio.create_task(asyncio.to_thread(
                 service.save_conversation_message, user["id"], "user", request.message, client, request_id
-            )
-            profile_task = (
-                extractor.save_profile_data(user_id=user["id"], profile_data=fresh_profile_data, client=client)
-                if fresh_profile_data else asyncio.sleep(0)
-            )
-            saved_history, _, _ = await asyncio.gather(history_task, save_user_task, profile_task)
-            conversation_history = saved_history or client_history
+            ))]
+            if fresh_profile_data:
+                maintenance_tasks.append(asyncio.create_task(extractor.save_profile_data(
+                    user_id=user["id"], profile_data=fresh_profile_data, client=client
+                )))
             async for token in service.stream_ai_response(
                 user_message=request.message,
                 user_id=user["id"],
                 client=client,
                 fresh_profile_data=fresh_profile_data or None,
-                conversation_history=conversation_history,
+                conversation_history=client_history,
             ):
                 if first_token_at is None:
                     first_token_at = time.monotonic()
@@ -301,6 +301,7 @@ async def stream_chat_with_trainer(
             elapsed_ms = round((time.monotonic() - started) * 1000)
             first_token_ms = round(((first_token_at or time.monotonic()) - started) * 1000)
             reply_text = "".join(full_reply).strip()
+            await asyncio.gather(*maintenance_tasks, return_exceptions=True)
             if reply_text:
                 await asyncio.to_thread(
                     service.save_conversation_message,
@@ -309,6 +310,8 @@ async def stream_chat_with_trainer(
             logger.info("coach_stream_complete request_id=%s user=%s first_token_ms=%s total_ms=%s chars=%s", request_id, user["id"][:8], first_token_ms, elapsed_ms, len("".join(full_reply)))
             yield f"event: done\ndata: {json.dumps({'request_id': request_id, 'first_token_ms': first_token_ms, 'total_ms': elapsed_ms, 'provider': service.last_provider})}\n\n"
         except Exception:
+            if "maintenance_tasks" in locals():
+                await asyncio.gather(*maintenance_tasks, return_exceptions=True)
             logger.exception("coach_stream_failed request_id=%s user=%s", request_id, user["id"][:8])
             yield f"event: error\ndata: {json.dumps({'request_id': request_id, 'message': 'Ojas could not finish this reply. Try again.'})}\n\n"
 
