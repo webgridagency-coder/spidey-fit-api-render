@@ -255,22 +255,20 @@ async def stream_chat_with_trainer(
 
     client = SupabaseClient.get_service_client()
     trainer_service = TrainerService(client)
-    quota = await trainer_service.get_quota(user["id"])
-    if quota["messages_remaining"] is not None and quota["messages_remaining"] <= 0:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Coaching allowance reached")
-    usage = await trainer_service.increment_usage(user["id"])
+    try:
+        # increment_usage already enforces the active plan. Calling get_quota
+        # first repeated the same database work and delayed every first token.
+        usage = await trainer_service.increment_usage(user["id"])
+    except Exception as exc:
+        if "limit exceeded" in str(exc).lower():
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Coaching allowance reached") from exc
+        raise
     request_id = uuid.uuid4().hex[:12]
     started = time.monotonic()
     extractor = ProfileExtractorService()
     fresh_profile_data = extractor.extract_profile_data_fast(request.message)
-    if fresh_profile_data:
-        await extractor.save_profile_data(user_id=user["id"], profile_data=fresh_profile_data, client=client)
     service = AITrainerService()
-    saved_history = await asyncio.to_thread(service.get_saved_conversation_history, user["id"], client)
-    conversation_history = saved_history or [{"role": item.role, "content": item.content} for item in request.history]
-    await asyncio.to_thread(
-        service.save_conversation_message, user["id"], "user", request.message, client, request_id
-    )
+    client_history = [{"role": item.role, "content": item.content} for item in request.history]
 
     async def event_stream():
         first_token_at = None
@@ -279,6 +277,16 @@ async def stream_chat_with_trainer(
             yield f"event: meta\ndata: {json.dumps({'request_id': request_id, **usage})}\n\n"
             # Push headers/meta through buffering proxies before provider tokens arrive.
             yield ":" + (" " * 2048) + "\n\n"
+            history_task = asyncio.to_thread(service.get_saved_conversation_history, user["id"], client)
+            save_user_task = asyncio.to_thread(
+                service.save_conversation_message, user["id"], "user", request.message, client, request_id
+            )
+            profile_task = (
+                extractor.save_profile_data(user_id=user["id"], profile_data=fresh_profile_data, client=client)
+                if fresh_profile_data else asyncio.sleep(0)
+            )
+            saved_history, _, _ = await asyncio.gather(history_task, save_user_task, profile_task)
+            conversation_history = saved_history or client_history
             async for token in service.stream_ai_response(
                 user_message=request.message,
                 user_id=user["id"],

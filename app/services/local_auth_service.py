@@ -69,16 +69,22 @@ class LocalAuthService:
 
     def create_account(self, email: str, password: str):
         normalized = self.normalize_email(email)
-        if self.get_by_email(normalized):
-            raise ValueError("An account with this email already exists.")
         account = {
             "id": str(uuid4()),
             "email": normalized,
             "password_hash": self.hash_password(password),
             "is_active": True,
         }
-        response = self.client.table("ojas_accounts").insert(account).execute()
-        return response.data[0]
+        try:
+            # The database has a unique email constraint. Let one insert do
+            # the existence check instead of adding a separate network query.
+            response = self.client.table("ojas_accounts").insert(account).execute()
+            return response.data[0]
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "23505" in error_text or "duplicate" in error_text or "unique" in error_text:
+                raise ValueError("An account with this email already exists.") from exc
+            raise
 
     def authenticate(self, email: str, password: str):
         account = self.get_by_email(email)

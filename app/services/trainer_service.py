@@ -92,10 +92,16 @@ class TrainerService:
         Returns:
             Dict with messages_used and messages_remaining
         """
-        await self.get_or_create_usage(user_id)
+        usage = await self.get_or_create_usage(user_id)
         plan = self.get_plan(user_id)
         rule = self.PLAN_RULES[plan]
-        messages_used = self.get_period_usage(user_id, plan)
+        # Base is a daily plan, so today's already-loaded record is the full
+        # period total. Avoid another database round trip on every page load.
+        messages_used = (
+            int(usage.get("messages_used", 0) or 0)
+            if rule["period"] == "day"
+            else self.get_period_usage(user_id, plan)
+        )
         messages_remaining = None if rule["limit"] is None else max(0, rule["limit"] - messages_used)
         
         return {
@@ -122,7 +128,11 @@ class TrainerService:
         usage = await self.get_or_create_usage(user_id)
         plan = self.get_plan(user_id)
         rule = self.PLAN_RULES[plan]
-        messages_used = self.get_period_usage(user_id, plan)
+        messages_used = (
+            int(usage.get("messages_used", 0) or 0)
+            if rule["period"] == "day"
+            else self.get_period_usage(user_id, plan)
+        )
         
         # Enforce limit
         if rule["limit"] is not None and messages_used >= rule["limit"]:
