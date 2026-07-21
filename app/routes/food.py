@@ -51,6 +51,9 @@ class FoodEstimateResponse(BaseModel):
 class TodayStatusResponse(BaseModel):
     """Response model for today's status"""
     remaining_credits: int
+    credit_limit: int
+    credit_period: str
+    plan: str
     daily_nutrition_totals: DailyNutritionTotals
     food_entries: List[Dict[str, Any]]
 
@@ -110,7 +113,7 @@ async def estimate_food_from_text(
         if remaining_credits <= 0:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Daily AI limit reached. You have 0 AI estimates left today."
+                detail=await credit_service.limit_message(user_id)
             )
         
         # Perform AI estimation
@@ -223,7 +226,7 @@ async def estimate_food_from_image(
         if remaining_credits <= 0:
             raise HTTPException(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Daily AI limit reached. You have 0 AI estimates left today."
+                detail=await credit_service.limit_message(user_id)
             )
         
         # Perform AI estimation
@@ -296,7 +299,7 @@ async def preview_food_from_image(
         raise HTTPException(status_code=413, detail="Image must be between 1 byte and 10MB")
     credit_service = CreditService(supabase)
     if await credit_service.check_remaining_credits(user["id"]) <= 0:
-        raise HTTPException(status_code=402, detail="Daily AI estimate allowance reached")
+        raise HTTPException(status_code=402, detail=await credit_service.limit_message(user["id"]))
     description_hint = portion_hint.strip()[:240]
     try:
         result = await FoodAIService().estimate_from_image(image_bytes, image.content_type, description_hint)
@@ -335,8 +338,8 @@ async def confirm_food_entry(
     )
     totals = await service.get_daily_nutrition_totals(user["id"])
     entries = await service.get_today_entries(user["id"])
-    credits = await CreditService(supabase).check_remaining_credits(user["id"])
-    return TodayStatusResponse(remaining_credits=credits, daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
+    credit_info = await CreditService(supabase).get_or_create_daily_credits(user["id"])
+    return TodayStatusResponse(remaining_credits=credit_info["remaining_credits"], credit_limit=credit_info["credits_limit"], credit_period=credit_info["period"], plan=credit_info["plan"], daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
 
 
 @router.put("/entries/{entry_id}", response_model=TodayStatusResponse)
@@ -357,8 +360,8 @@ async def update_food_entry(
     service = FoodEntryService(supabase)
     totals = await service.get_daily_nutrition_totals(user["id"])
     entries = await service.get_today_entries(user["id"])
-    credits = await CreditService(supabase).check_remaining_credits(user["id"])
-    return TodayStatusResponse(remaining_credits=credits, daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
+    credit_info = await CreditService(supabase).get_or_create_daily_credits(user["id"])
+    return TodayStatusResponse(remaining_credits=credit_info["remaining_credits"], credit_limit=credit_info["credits_limit"], credit_period=credit_info["period"], plan=credit_info["plan"], daily_nutrition_totals=DailyNutritionTotals(**totals), food_entries=entries)
 
 
 @router.get("/today", response_model=TodayStatusResponse, status_code=status.HTTP_200_OK)
@@ -395,6 +398,9 @@ async def get_today_status(
         
         return TodayStatusResponse(
             remaining_credits=credit_info['remaining_credits'],
+            credit_limit=credit_info['credits_limit'],
+            credit_period=credit_info['period'],
+            plan=credit_info['plan'],
             daily_nutrition_totals=DailyNutritionTotals(**daily_totals),
             food_entries=food_entries
         )
@@ -403,7 +409,10 @@ async def get_today_status(
         logger.error(f"Error getting today's status for user {user_id}: {e}")
         # Return safe defaults on error
         return TodayStatusResponse(
-            remaining_credits=3,
+            remaining_credits=0,
+            credit_limit=6,
+            credit_period="month",
+            plan="base",
             daily_nutrition_totals=DailyNutritionTotals(
                 calories=0, protein=0, carbs=0, fats=0, fiber=0
             ),

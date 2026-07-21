@@ -13,7 +13,7 @@ class TrainerService:
     
     PLAN_RULES = {
         "base": {"limit": 5, "period": "day"},
-        "flow": {"limit": 50, "period": "month"},
+        "flow": {"limit": 1500, "period": "month"},
         "orbit": {"limit": None, "period": "unlimited"},
     }
     
@@ -136,7 +136,7 @@ class TrainerService:
         
         # Enforce limit
         if rule["limit"] is not None and messages_used >= rule["limit"]:
-            raise Exception("Daily message limit exceeded")
+            raise Exception(f"{rule['period'].title()} message limit exceeded")
         
         # Increment
         daily_count = int(usage.get("messages_used", 0) or 0) + 1

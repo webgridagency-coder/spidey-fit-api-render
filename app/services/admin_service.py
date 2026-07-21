@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 class AdminService:
     PLAN_LIMITS = {
-        "base": "5 messages / day",
-        "flow": "50 messages / month",
-        "orbit": "Unlimited coaching",
+        "base": "5 messages / day · 6 nutrition scans / month",
+        "flow": "1,500 messages / month · 6 nutrition scans / day",
+        "orbit": "Unlimited coaching · 6 nutrition scans / day",
     }
 
     def __init__(self, client: Client):

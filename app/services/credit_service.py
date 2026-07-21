@@ -1,177 +1,130 @@
-"""
-Credit Service - Manages daily AI credit system for food tracking
-Handles credit checking, consumption, and daily reset logic
-"""
+"""Plan-aware AI nutrition credit accounting for Ojas."""
 
+from calendar import monthrange
 from datetime import date
-from typing import Dict, Any
 import logging
+from typing import Any, Dict
+
 from supabase import Client
+
 
 logger = logging.getLogger(__name__)
 
 
 class CreditService:
-    """Service for managing user AI credits"""
-    
-    DEFAULT_DAILY_CREDITS = 3
-    
+    """Manage the shared AI nutrition allowance used by photo and text scans."""
+
+    PLAN_RULES = {
+        "base": {"limit": 6, "period": "month"},
+        "flow": {"limit": 6, "period": "day"},
+        "orbit": {"limit": 6, "period": "day"},
+    }
+    DEFAULT_DAILY_CREDITS = 6
+
     def __init__(self, supabase: Client):
-        """
-        Initialize credit service
-        
-        Args:
-            supabase: Supabase client instance
-        """
         self.supabase = supabase
-    
-    async def get_or_create_daily_credits(self, user_id: str, today: date = None) -> Dict[str, Any]:
-        """
-        Get or create credit record for today
-        
-        Args:
-            user_id: User ID
-            today: Date to check (defaults to today)
-            
-        Returns:
-            Dict with: credits_used, credits_limit, remaining_credits
-        """
-        if today is None:
-            today = date.today()
-        
-        today_str = today.isoformat()
-        
+
+    def get_plan(self, user_id: str) -> str:
         try:
-            # Try to get existing record
-            response = self.supabase.table('user_food_credits').select('*').eq(
-                'user_id', user_id
-            ).eq(
-                'date', today_str
-            ).execute()
-            
-            if response.data and len(response.data) > 0:
-                # Record exists
-                record = response.data[0]
-                credits_used = record['credits_used']
-                credits_limit = record['credits_limit']
+            response = self.supabase.table("ojas_accounts").select("plan").eq("id", user_id).limit(1).execute()
+            plan = str((response.data or [{}])[0].get("plan") or "base")
+            return plan if plan in self.PLAN_RULES else "base"
+        except Exception:
+            logger.warning("Could not load nutrition plan for user %s", user_id[:8])
+            return "base"
+
+    @staticmethod
+    def _period_bounds(period: str, today: date) -> tuple[str, str]:
+        if period == "day":
+            value = today.isoformat()
+            return value, value
+        return today.replace(day=1).isoformat(), today.replace(day=monthrange(today.year, today.month)[1]).isoformat()
+
+    def _period_usage(self, user_id: str, period: str, today: date) -> int:
+        start, end = self._period_bounds(period, today)
+        response = self.supabase.table("user_food_credits").select("credits_used").eq(
+            "user_id", user_id
+        ).gte("date", start).lte("date", end).execute()
+        return sum(int(row.get("credits_used", 0) or 0) for row in (response.data or []))
+
+    async def get_or_create_daily_credits(self, user_id: str, today: date | None = None) -> Dict[str, Any]:
+        today = today or date.today()
+        today_str = today.isoformat()
+        plan = self.get_plan(user_id)
+        rule = self.PLAN_RULES[plan]
+        try:
+            response = self.supabase.table("user_food_credits").select("*").eq(
+                "user_id", user_id
+            ).eq("date", today_str).execute()
+            if response.data:
+                daily_used = int(response.data[0].get("credits_used", 0) or 0)
+                if int(response.data[0].get("credits_limit", 0) or 0) != rule["limit"]:
+                    self.supabase.table("user_food_credits").update({"credits_limit": rule["limit"]}).eq(
+                        "user_id", user_id
+                    ).eq("date", today_str).execute()
             else:
-                # Create new record for today
-                insert_data = {
-                    'user_id': user_id,
-                    'date': today_str,
-                    'credits_used': 0,
-                    'credits_limit': self.DEFAULT_DAILY_CREDITS
-                }
-                
-                response = self.supabase.table('user_food_credits').insert(
-                    insert_data
-                ).execute()
-                
-                if not response.data or len(response.data) == 0:
-                    raise Exception("Failed to create credit record")
-                
-                record = response.data[0]
-                credits_used = 0
-                credits_limit = self.DEFAULT_DAILY_CREDITS
-                
-                logger.info(f"Created new credit record for user {user_id}: {credits_limit} credits")
-            
-            remaining_credits = max(0, credits_limit - credits_used)
-            
+                created = self.supabase.table("user_food_credits").insert({
+                    "user_id": user_id,
+                    "date": today_str,
+                    "credits_used": 0,
+                    "credits_limit": rule["limit"],
+                }).execute()
+                if not created.data:
+                    raise RuntimeError("Failed to create nutrition credit record")
+                daily_used = 0
+
+            used = daily_used if rule["period"] == "day" else self._period_usage(user_id, rule["period"], today)
             return {
-                'credits_used': credits_used,
-                'credits_limit': credits_limit,
-                'remaining_credits': remaining_credits,
-                'date': today_str
+                "credits_used": used,
+                "credits_limit": rule["limit"],
+                "remaining_credits": max(0, rule["limit"] - used),
+                "date": today_str,
+                "plan": plan,
+                "period": rule["period"],
+                "daily_credits_used": daily_used,
             }
-            
-        except Exception as e:
-            logger.error(f"Error getting/creating credits for user {user_id}: {e}")
-            # Return default values on error
+        except Exception as exc:
+            logger.error("Error loading nutrition credits for user %s: %s", user_id[:8], exc)
             return {
-                'credits_used': 0,
-                'credits_limit': self.DEFAULT_DAILY_CREDITS,
-                'remaining_credits': self.DEFAULT_DAILY_CREDITS,
-                'date': today_str
+                "credits_used": rule["limit"],
+                "credits_limit": rule["limit"],
+                "remaining_credits": 0,
+                "date": today_str,
+                "plan": plan,
+                "period": rule["period"],
+                "daily_credits_used": 0,
             }
-    
+
     async def check_remaining_credits(self, user_id: str) -> int:
-        """
-        Check how many credits user has remaining today
-        
-        Args:
-            user_id: User ID
-            
-        Returns:
-            Number of remaining credits
-        """
-        credit_info = await self.get_or_create_daily_credits(user_id)
-        return credit_info['remaining_credits']
-    
-    async def consume_credit(self, user_id: str) -> Dict[str, Any]:
-        """
-        Consume one credit for the user
-        
-        Args:
-            user_id: User ID
-            
-        Returns:
-            Updated credit info with remaining_credits
-            
-        Raises:
-            ValueError: If no credits remaining
-        """
+        return int((await self.get_or_create_daily_credits(user_id))["remaining_credits"])
+
+    async def consume_credit(self, user_id: str, amount: int = 1) -> Dict[str, Any]:
+        if amount < 1:
+            raise ValueError("Credit amount must be positive")
         today = date.today()
-        today_str = today.isoformat()
-        
-        try:
-            # Get current credits
-            credit_info = await self.get_or_create_daily_credits(user_id, today)
-            
-            if credit_info['remaining_credits'] <= 0:
-                raise ValueError("No credits remaining for today")
-            
-            # Increment credits_used
-            new_credits_used = credit_info['credits_used'] + 1
-            
-            response = self.supabase.table('user_food_credits').update({
-                'credits_used': new_credits_used
-            }).eq(
-                'user_id', user_id
-            ).eq(
-                'date', today_str
-            ).execute()
-            
-            if not response.data or len(response.data) == 0:
-                raise Exception("Failed to update credit usage")
-            
-            new_remaining = credit_info['credits_limit'] - new_credits_used
-            
-            logger.info(f"Consumed 1 credit for user {user_id}. Remaining: {new_remaining}")
-            
-            return {
-                'credits_used': new_credits_used,
-                'credits_limit': credit_info['credits_limit'],
-                'remaining_credits': new_remaining,
-                'date': today_str
-            }
-            
-        except ValueError:
-            # Re-raise credit exhausted error
-            raise
-        except Exception as e:
-            logger.error(f"Error consuming credit for user {user_id}: {e}")
-            raise Exception(f"Failed to consume credit: {str(e)}")
-    
+        current = await self.get_or_create_daily_credits(user_id, today)
+        if current["remaining_credits"] < amount:
+            raise ValueError("AI nutrition allowance reached")
+        new_daily_used = int(current["daily_credits_used"]) + amount
+        response = self.supabase.table("user_food_credits").update({
+            "credits_used": new_daily_used,
+            "credits_limit": current["credits_limit"],
+        }).eq("user_id", user_id).eq("date", today.isoformat()).execute()
+        if not response.data:
+            raise RuntimeError("Failed to update nutrition credit usage")
+        new_used = int(current["credits_used"]) + amount
+        return {
+            **current,
+            "credits_used": new_used,
+            "daily_credits_used": new_daily_used,
+            "remaining_credits": max(0, int(current["credits_limit"]) - new_used),
+        }
+
     async def has_credits(self, user_id: str) -> bool:
-        """
-        Check if user has any credits remaining
-        
-        Args:
-            user_id: User ID
-            
-        Returns:
-            True if user has credits, False otherwise
-        """
-        remaining = await self.check_remaining_credits(user_id)
-        return remaining > 0
+        return await self.check_remaining_credits(user_id) > 0
+
+    async def limit_message(self, user_id: str) -> str:
+        info = await self.get_or_create_daily_credits(user_id)
+        if info["plan"] in {"flow", "orbit"}:
+            return f"You’ve used today’s 6 AI nutrition scans. Your {info['plan'].title()} allowance resets tomorrow."
+        return "You’ve used your 6 free AI nutrition scans for this month. Upgrade to Ojas Flow for 6 scans every day."

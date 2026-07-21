@@ -9,9 +9,9 @@ from typing import List, Literal, Optional
 
 class TrainerConversationMessage(BaseModel):
     role: Literal["user", "assistant"]
-    # Ojas can return replies longer than the 1,200-character model context
-    # slice. Accept the saved reply at the API boundary; AITrainerService
-    # safely trims every history item before adding it to the model prompt.
+    # Provider output can legitimately be longer than the 1,200-character
+    # context window used by AITrainerService. Accept it at the API boundary;
+    # the service trims each item before it is added to the model prompt.
     content: str = Field(..., min_length=1, max_length=4000)
 
 
