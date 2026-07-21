@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM_EMAIL: str = ""
+    ADMIN_EMAILS: str = ""
     
     # OpenRouter AI Configuration (DeepSeek via OpenRouter)
     OPENROUTER_API_KEY: str = ""
@@ -56,6 +57,11 @@ class Settings(BaseSettings):
         if "*" in origins:
             raise ValueError("CORS_ORIGINS cannot include '*' when credentials are enabled")
         return origins
+
+    @property
+    def admin_emails_list(self) -> List[str]:
+        """Server-side owner allowlist. Empty deliberately means no admin access."""
+        return [email.strip().lower() for email in self.ADMIN_EMAILS.split(",") if email.strip()]
     
     class Config:
         env_file = ".env"

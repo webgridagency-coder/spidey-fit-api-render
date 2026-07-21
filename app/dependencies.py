@@ -103,6 +103,24 @@ async def get_current_active_user(
     return current_user
 
 
+async def get_current_admin(
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Require an authenticated account on the server-side admin allowlist."""
+    email = str(current_user.get("email") or "").strip().lower()
+    if not settings.admin_emails_list:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin access is not configured.",
+        )
+    if not email or email not in settings.admin_emails_list:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account does not have admin access.",
+        )
+    return {**current_user, "email": email, "admin_role": "owner"}
+
+
 async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(
         HTTPBearer(auto_error=False)
