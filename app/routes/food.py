@@ -35,6 +35,11 @@ class DailyNutritionTotals(BaseModel):
     carbs: float
     fats: float
     fiber: float
+    sodium_mg: float = 0
+    potassium_mg: float = 0
+    calcium_mg: float = 0
+    iron_mg: float = 0
+    vitamin_c_mg: float = 0
 
 
 class FoodEstimateResponse(BaseModel):
@@ -43,6 +48,12 @@ class FoodEstimateResponse(BaseModel):
     protein: float = Field(..., description="Estimated protein in grams")
     carbs: float = Field(..., description="Estimated carbs in grams")
     fats: float = Field(..., description="Estimated fats in grams")
+    fiber: float = 0
+    sodium_mg: float = 0
+    potassium_mg: float = 0
+    calcium_mg: float = 0
+    iron_mg: float = 0
+    vitamin_c_mg: float = 0
     confidence_note: str = Field(..., description="Confidence note about the estimation")
     remaining_credits: int = Field(..., description="AI credits remaining today")
     daily_nutrition_totals: DailyNutritionTotals = Field(..., description="Updated daily nutrition totals")
@@ -63,6 +74,12 @@ class FoodPreviewResponse(BaseModel):
     protein: float
     carbs: float
     fats: float
+    fiber: float = 0
+    sodium_mg: float = 0
+    potassium_mg: float = 0
+    calcium_mg: float = 0
+    iron_mg: float = 0
+    vitamin_c_mg: float = 0
     confidence_note: str
     remaining_credits: int
     meal_type: str
@@ -78,6 +95,11 @@ class FoodConfirmRequest(BaseModel):
     carbs: float = Field(..., ge=0, le=2000)
     fats: float = Field(..., ge=0, le=1000)
     fiber: float = Field(default=0, ge=0, le=500)
+    sodium_mg: float = Field(default=0, ge=0, le=50000)
+    potassium_mg: float = Field(default=0, ge=0, le=50000)
+    calcium_mg: float = Field(default=0, ge=0, le=10000)
+    iron_mg: float = Field(default=0, ge=0, le=1000)
+    vitamin_c_mg: float = Field(default=0, ge=0, le=10000)
     confidence_note: str = Field(default="User reviewed AI estimate", max_length=1000)
     source: str = Field(default="ai_image", pattern="^(ai_text|ai_image|manual)$")
 
@@ -128,8 +150,9 @@ async def estimate_food_from_text(
             protein=result['protein'],
             carbs=result['carbs'],
             fats=result['fats'],
-            fiber=0.0,  # Gemini doesn't estimate fiber yet
+            fiber=result.get('fiber', 0.0),
             source='ai_text',
+            micronutrients={key: result.get(key, 0.0) for key in ('sodium_mg', 'potassium_mg', 'calcium_mg', 'iron_mg', 'vitamin_c_mg')},
             confidence_note=result['confidence_note'],
             description=request.description
         )
@@ -147,6 +170,12 @@ async def estimate_food_from_text(
             protein=result['protein'],
             carbs=result['carbs'],
             fats=result['fats'],
+            fiber=result.get('fiber', 0.0),
+            sodium_mg=result.get('sodium_mg', 0.0),
+            potassium_mg=result.get('potassium_mg', 0.0),
+            calcium_mg=result.get('calcium_mg', 0.0),
+            iron_mg=result.get('iron_mg', 0.0),
+            vitamin_c_mg=result.get('vitamin_c_mg', 0.0),
             confidence_note=result['confidence_note'],
             remaining_credits=credit_info['remaining_credits'],
             daily_nutrition_totals=DailyNutritionTotals(**daily_totals)
@@ -241,8 +270,9 @@ async def estimate_food_from_image(
             protein=result['protein'],
             carbs=result['carbs'],
             fats=result['fats'],
-            fiber=0.0,  # Gemini doesn't estimate fiber yet
+            fiber=result.get('fiber', 0.0),
             source='ai_image',
+            micronutrients={key: result.get(key, 0.0) for key in ('sodium_mg', 'potassium_mg', 'calcium_mg', 'iron_mg', 'vitamin_c_mg')},
             confidence_note=result['confidence_note'],
             description=result.get("food_description") or f"Food photo upload - {image.filename}"
         )
@@ -260,6 +290,12 @@ async def estimate_food_from_image(
             protein=result['protein'],
             carbs=result['carbs'],
             fats=result['fats'],
+            fiber=result.get('fiber', 0.0),
+            sodium_mg=result.get('sodium_mg', 0.0),
+            potassium_mg=result.get('potassium_mg', 0.0),
+            calcium_mg=result.get('calcium_mg', 0.0),
+            iron_mg=result.get('iron_mg', 0.0),
+            vitamin_c_mg=result.get('vitamin_c_mg', 0.0),
             confidence_note=result['confidence_note'],
             remaining_credits=credit_info['remaining_credits'],
             daily_nutrition_totals=DailyNutritionTotals(**daily_totals)
@@ -334,6 +370,7 @@ async def confirm_food_entry(
     await service.save_food_entry(
         user_id=user["id"], meal_type=request.meal_type, calories=request.calories,
         protein=request.protein, carbs=request.carbs, fats=request.fats, fiber=request.fiber,
+        micronutrients={key: getattr(request, key) for key in ('sodium_mg', 'potassium_mg', 'calcium_mg', 'iron_mg', 'vitamin_c_mg')},
         source=request.source, confidence_note=request.confidence_note, description=request.description,
     )
     totals = await service.get_daily_nutrition_totals(user["id"])
@@ -352,12 +389,13 @@ async def update_food_entry(
     existing = supabase.table("food_entries").select("id").eq("id", entry_id).eq("user_id", user["id"]).limit(1).execute().data
     if not existing:
         raise HTTPException(status_code=404, detail="Meal entry not found")
+    service = FoodEntryService(supabase)
     supabase.table("food_entries").update({
         "meal_type": request.meal_type, "description": request.description,
         "calories": request.calories, "protein": request.protein, "carbs": request.carbs,
-        "fats": request.fats, "fiber": request.fiber, "confidence_note": request.confidence_note,
+        "fats": request.fats, "fiber": request.fiber,
+        "confidence_note": service._pack_note(request.confidence_note, {key: getattr(request, key) for key in ('sodium_mg', 'potassium_mg', 'calcium_mg', 'iron_mg', 'vitamin_c_mg')}),
     }).eq("id", entry_id).eq("user_id", user["id"]).execute()
-    service = FoodEntryService(supabase)
     totals = await service.get_daily_nutrition_totals(user["id"])
     entries = await service.get_today_entries(user["id"])
     credit_info = await CreditService(supabase).get_or_create_daily_credits(user["id"])
@@ -414,7 +452,8 @@ async def get_today_status(
             credit_period="month",
             plan="base",
             daily_nutrition_totals=DailyNutritionTotals(
-                calories=0, protein=0, carbs=0, fats=0, fiber=0
+                calories=0, protein=0, carbs=0, fats=0, fiber=0,
+                sodium_mg=0, potassium_mg=0, calcium_mg=0, iron_mg=0, vitamin_c_mg=0
             ),
             food_entries=[]
         )

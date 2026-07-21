@@ -8,6 +8,7 @@ from typing import Dict, Any, List
 import logging
 from supabase import Client
 from decimal import Decimal
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class FoodEntryService:
         fats: float,
         fiber: float,
         source: str,
+        micronutrients: Dict[str, float] | None = None,
         confidence_note: str = None,
         description: str = None,
         entry_date: date = None
@@ -86,7 +88,7 @@ class FoodEntryService:
                 'fats': float(fats),
                 'fiber': float(fiber),
                 'source': source,
-                'confidence_note': confidence_note,
+                'confidence_note': self._pack_note(confidence_note, micronutrients),
                 'description': description
             }
             
@@ -128,7 +130,7 @@ class FoodEntryService:
         try:
             # Query all entries for this user and date
             response = self.supabase.table('food_entries').select(
-                'calories, protein, carbs, fats, fiber'
+                'calories, protein, carbs, fats, fiber, confidence_note'
             ).eq(
                 'user_id', user_id
             ).eq(
@@ -141,7 +143,12 @@ class FoodEntryService:
                 'protein': 0.0,
                 'carbs': 0.0,
                 'fats': 0.0,
-                'fiber': 0.0
+                'fiber': 0.0,
+                'sodium_mg': 0.0,
+                'potassium_mg': 0.0,
+                'calcium_mg': 0.0,
+                'iron_mg': 0.0,
+                'vitamin_c_mg': 0.0,
             }
             
             if response.data:
@@ -151,6 +158,9 @@ class FoodEntryService:
                     totals['carbs'] += float(entry.get('carbs', 0))
                     totals['fats'] += float(entry.get('fats', 0))
                     totals['fiber'] += float(entry.get('fiber', 0))
+                    _, micros = self._unpack_note(entry.get('confidence_note'))
+                    for key in self.MICRO_KEYS:
+                        totals[key] += micros[key]
             
             logger.info(f"Calculated daily totals for user {user_id} on {date_str}: {totals['calories']} cal")
             
@@ -164,7 +174,12 @@ class FoodEntryService:
                 'protein': 0.0,
                 'carbs': 0.0,
                 'fats': 0.0,
-                'fiber': 0.0
+                'fiber': 0.0,
+                'sodium_mg': 0.0,
+                'potassium_mg': 0.0,
+                'calcium_mg': 0.0,
+                'iron_mg': 0.0,
+                'vitamin_c_mg': 0.0,
             }
     
     async def get_today_entries(self, user_id: str, entry_date: date = None) -> List[Dict[str, Any]]:
@@ -191,6 +206,10 @@ class FoodEntryService:
             ).order('created_at', desc=False).execute()
             
             entries = response.data if response.data else []
+            for entry in entries:
+                clean_note, micros = self._unpack_note(entry.get('confidence_note'))
+                entry['confidence_note'] = clean_note
+                entry['micronutrients'] = micros
             
             logger.info(f"Retrieved {len(entries)} food entries for user {user_id} on {date_str}")
             
@@ -261,3 +280,24 @@ class FoodEntryService:
         except Exception as e:
             logger.error(f"Error deleting entry {entry_id} for user {user_id}: {e}")
             return False
+    MICRO_PREFIX = "__OJAS_MICROS__"
+    MICRO_KEYS = ("sodium_mg", "potassium_mg", "calcium_mg", "iron_mg", "vitamin_c_mg")
+
+    @classmethod
+    def _pack_note(cls, note: str | None, micronutrients: Dict[str, float] | None) -> str | None:
+        micros = {key: max(0.0, float((micronutrients or {}).get(key, 0) or 0)) for key in cls.MICRO_KEYS}
+        return f"{cls.MICRO_PREFIX}{json.dumps(micros, separators=(',', ':'))}\n{note or ''}".strip()
+
+    @classmethod
+    def _unpack_note(cls, note: str | None) -> tuple[str | None, Dict[str, float]]:
+        text = str(note or "")
+        micros = {key: 0.0 for key in cls.MICRO_KEYS}
+        if text.startswith(cls.MICRO_PREFIX):
+            payload, _, clean = text[len(cls.MICRO_PREFIX):].partition("\n")
+            try:
+                decoded = json.loads(payload)
+                micros = {key: max(0.0, float(decoded.get(key, 0) or 0)) for key in cls.MICRO_KEYS}
+                return clean or None, micros
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+        return note, micros

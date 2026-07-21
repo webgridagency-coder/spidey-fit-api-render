@@ -20,7 +20,7 @@ class FoodAIService:
     
     # System prompt for Gemini Flash
     NUTRITION_PROMPT = """You are a nutrition estimation assistant.
-Estimate calories, protein (g), carbs (g), and fats (g) for the given food.
+Estimate calories, protein (g), carbs (g), fats (g), fiber (g), and the most useful micronutrients for the given food.
 Be conservative and realistic in your estimates.
 If uncertain, estimate slightly lower rather than higher.
 Always include a short confidence note explaining the basis of your estimate.
@@ -37,6 +37,12 @@ Return ONLY valid JSON in this exact format:
   "protein": number,
   "carbs": number,
   "fats": number,
+  "fiber": number,
+  "sodium_mg": number,
+  "potassium_mg": number,
+  "calcium_mg": number,
+  "iron_mg": number,
+  "vitamin_c_mg": number,
   "confidence_note": "string"
 }
 
@@ -243,6 +249,8 @@ Do not include any text outside the JSON object."""
             nutrition_data["protein"] = float(nutrition_data["protein"])
             nutrition_data["carbs"] = float(nutrition_data["carbs"])
             nutrition_data["fats"] = float(nutrition_data["fats"])
+            for field in ("fiber", "sodium_mg", "potassium_mg", "calcium_mg", "iron_mg", "vitamin_c_mg"):
+                nutrition_data[field] = max(0.0, float(nutrition_data.get(field, 0) or 0))
             
             # Ensure confidence_note is a string
             nutrition_data["confidence_note"] = str(nutrition_data["confidence_note"])
@@ -261,6 +269,12 @@ Do not include any text outside the JSON object."""
                 "protein": 10,
                 "carbs": 30,
                 "fats": 10,
+                "fiber": 3,
+                "sodium_mg": 250,
+                "potassium_mg": 300,
+                "calcium_mg": 80,
+                "iron_mg": 2,
+                "vitamin_c_mg": 5,
                 "confidence_note": "AI analysis was unclear. These are conservative estimates. Please adjust based on your knowledge."
             }
         except Exception as e:
